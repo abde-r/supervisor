@@ -40,5 +40,5 @@ programs:
       ENV_VAR: "value"
 ```
 
-License
+<h3>License</h3>
 This project is licensed under the MIT License. See the LICENSE file for details.
