@@ -1,6 +1,9 @@
 programs:
   example_program:
-    cmd: "echo Hello, World!"
+    cmd: "echo"
+    args:
+      - "Hello, "
+      - "World!"
     numprocs: 1
     autostart: true
     autorestart: "always"
@@ -13,3 +16,33 @@ programs:
     stderr: "logs/example_program.err"
     env:
       ENV_VAR: "value"
+  example_program_2:
+    cmd: "echo"
+    args:
+      - "Hello, "
+      - "World2!"
+    numprocs: 1
+    autostart: true
+    autorestart: "always"
+    startretries: 3
+    starttime: 1
+    stopsignal: "TERM"
+    stoptime: 5
+    exitcodes: 0
+    stdout: "logs/example_program.out"
+    stderr: "logs/example_program.err"
+    env:
+      ENV_VAR: "value"
+  nginx_program:
+    cmd: "/opt/homebrew/bin/nginx"
+    autostart: true
+    autorestart: "always"
+    args:
+      - "-c"
+      - "/opt/homebrew/etc/nginx/nginx.conf"
+    exitcodes: [0, 2]
+    startretries: 3
+    starttime: 1
+    stopsignal: "TERM"
+    stoptime: 5
+    numprocs: 1

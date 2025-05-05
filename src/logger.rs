@@ -1,5 +1,4 @@
-use tracing_subscriber::FmtSubscriber;
-use tracing_subscriber::fmt::{SubscriberBuilder, format};
+use tracing_subscriber::fmt::{SubscriberBuilder};
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_appender::non_blocking::WorkerGuard;
 

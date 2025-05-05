@@ -3,6 +3,7 @@ use tokio::process::Child;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use tokio::process::Command;
 use tracing::{info};
 
 // pub use crate::parse::ProgramConfig;
@@ -19,12 +20,17 @@ pub struct RuntimeJob {
 pub type SupervisorState = Arc<RwLock<HashMap<String, RuntimeJob>>>;
 
 pub async fn spawn_children(cfg: &ProgramConfig) -> Vec<Child> {
-    let mut vec = Vec::with_capacity(cfg.numprocs);
+    let mut children = Vec::with_capacity(cfg.numprocs);
+    tracing::debug!("About to spawn: {:?} {:?}", &cfg.cmd, &cfg.args);
     for i in 0..cfg.numprocs {
-        let mut cmd = tokio::process::Command::new("sh");
-        cmd.arg("-c").arg(&cfg.cmd).current_dir(cfg.workingdir.as_deref().unwrap_or("."));
-        if let Some(env) = &cfg.env {
-            for (k, v) in env {
+        let mut cmd = Command::new(&cfg.cmd);
+        cmd.args(&cfg.args);
+        if let Some(dir) = &cfg.workingdir {
+            cmd.current_dir(dir);
+        }
+        // cmd.arg("-c").arg(&cfg.cmd).current_dir(cfg.workingdir.as_deref().unwrap_or("."));
+        if let Some(envs) = &cfg.env {
+            for (k, v) in envs {
                 cmd.env(k, v);
             }
         }
@@ -35,12 +41,12 @@ pub async fn spawn_children(cfg: &ProgramConfig) -> Vec<Child> {
             pid = child.id().unwrap_or(0),
             "Process started"
         );
-        vec.push(child);
+        children.push(child);
     }
-    vec
+    children
 }
 
-pub async fn apply_config(new_cfg: Config, state: SupervisorState) {
+pub async fn apply_config(new_cfg: &Config, state: SupervisorState) {
     info!(
         "Applying new configuration with {} programs",
         new_cfg.programs.len()
@@ -66,8 +72,8 @@ pub async fn apply_config(new_cfg: Config, state: SupervisorState) {
     }
 
     // Adding and Updating jobs
-    for (name, prog_cfg) in new_cfg.programs {
-        match map.get_mut(&name) {
+    for (name, prog_cfg) in &new_cfg.programs {
+        match map.get_mut(name) {
             Some(rt_job) => {
                 let current = rt_job.children.len();
                 let desired = prog_cfg.numprocs;
@@ -92,16 +98,17 @@ pub async fn apply_config(new_cfg: Config, state: SupervisorState) {
                         );
                     }
                 }
-                rt_job.config = prog_cfg; // Updating stored config
+                rt_job.config = prog_cfg.clone(); // Updating stored config
             }
             None => {
+                info!("About to spawn: {:?} {:?}", &prog_cfg.cmd, &prog_cfg.args);
                 info!(
                     program = %name,
                     "Starting new job with {} replicas",
                     prog_cfg.numprocs
                 );
                 let children = spawn_children(&prog_cfg).await;
-                map.insert(name.clone(), RuntimeJob { config: prog_cfg, children });
+                map.insert(name.clone(), RuntimeJob { config: prog_cfg.clone(), children });
             }
         }
     }

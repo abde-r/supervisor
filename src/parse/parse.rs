@@ -1,7 +1,7 @@
 use serde::Deserialize;
 use std::{collections::HashMap, fs};
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 #[serde(untagged)]
 pub enum OneOrMany {
     One(u32),
@@ -9,9 +9,11 @@ pub enum OneOrMany {
 }
 
 // Define a struct matching your YAML config
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct ProgramConfig {
     pub cmd: String,
+    #[serde(default)]
+    pub args: Vec<String>,
     pub numprocs: usize,
     pub umask: Option<String>,
     pub workingdir: Option<String>,
@@ -27,7 +29,7 @@ pub struct ProgramConfig {
     pub env: Option<HashMap<String, String>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct Config {
     pub programs: HashMap<String, ProgramConfig>,
 }
