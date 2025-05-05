@@ -2,6 +2,10 @@
 
 Supervisor is a lightweight, asynchronous process supervisor written in Rust. It reads a YAML configuration file to manage and monitor multiple subprocesses, making it ideal for orchestrating long-running services, daemons, or background jobs.
 
+<div align="center">
+<img alt="img" src="https://64.media.tumblr.com/f6bfd226824ab67f564ead715105c115/342b800b723aa237-52/s500x750/1a5a378fd34399015e3c8f71f1197fe2898d207e.png"/>
+</div>
+<br/>
 <h3>Features</h3>
 YAML-based Configuration: Define multiple programs with customizable settings.
 
@@ -13,15 +17,16 @@ Graceful Shutdown: Handle termination signals to stop processes cleanly.
 
 Environment Variable Support: Set custom environment variables for each managed process.
 
+<br/>
 <h3>Getting Started</h3>
 <h4>Prerequisites</h4>
-Rust (edition 2021)
+<p>- Rust (edition 2021)</p>
+<p>- Cargo package manager</p>
 
-Cargo package manager
-
+<br/>
 <h4>Build the project:</h4>
 <p><code>cargo build --release</code></p>
-Create a configuration file in YAML format:
+create a configuration file in YAML format, i.e:
 
 ```
 programs:
@@ -39,6 +44,3 @@ programs:
     env:
       ENV_VAR: "value"
 ```
-
-<h3>License</h3>
-This project is licensed under the MIT License. See the LICENSE file for details.
