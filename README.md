@@ -37,25 +37,20 @@ Supervisor includes an interactive command-line interface (CLI) that allows user
 <strong>YAML-based Configuration:</strong> Define multiple programs with customizable settings.
 
 <br/>
-<br/>
 
 <strong>Concurrent Process Management:</strong> Spawn and manage multiple processes asynchronously using Tokio.
 
-<br/>
 <br/>
 
 <strong>Dynamic Configuration Reloading:</strong> Apply new configurations at runtime without restarting the supervisor.
 
 <br/>
-<br/>
 
 <strong>Graceful Shutdown:</strong> Handle termination signals to stop processes cleanly.
 
 <br/>
-<br/>
 
 <strong>Environment Variable Support:</strong> Set custom environment variables for each managed process.
 
-<br/>
 <br/>
 
