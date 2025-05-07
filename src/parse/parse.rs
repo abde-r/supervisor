@@ -8,7 +8,14 @@ pub enum OneOrMany {
     Many(Vec<u32>),
 }
 
-// Define a struct matching your YAML config
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum RestartPolicy {
+    Always,
+    Never,
+    Unexpected,
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct ProgramConfig {
     pub cmd: String,
@@ -18,7 +25,7 @@ pub struct ProgramConfig {
     pub umask: Option<String>,
     pub workingdir: Option<String>,
     pub autostart: bool,
-    pub autorestart: String,
+    pub autorestart: RestartPolicy,
     pub exitcodes: OneOrMany,
     pub startretries: usize,
     pub starttime: usize,

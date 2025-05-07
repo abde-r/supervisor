@@ -7,6 +7,7 @@ Supervisor is a lightweight, asynchronous process supervisor written in Rust. It
 <div align="center">
 <img alt="img" src="https://64.media.tumblr.com/f6bfd226824ab67f564ead715105c115/342b800b723aa237-52/s500x750/1a5a378fd34399015e3c8f71f1197fe2898d207e.png"/>
 </div>
+<br/>
 <p>
 In Unix and Unix-like operating systems, job control refers to control of jobs by a shell,
 especially interactively, where a "job" is a shell’s representation for a process group. Basic
@@ -19,40 +20,42 @@ execution (batch processing).
 
 <br/>
 <h3>Features</h3>
-YAML-based Configuration: Define multiple programs with customizable settings.
+<strong>Interactive Shell</strong><br/>
+Supervisor includes an interactive command-line interface (CLI) that allows users to manage and monitor subprocesses in real-time. This interactive shell provides the following capabilities:
 
-Concurrent Process Management: Spawn and manage multiple processes asynchronously using Tokio.
+- View Program Status: Use the status command to display the current status of all managed programs.
 
-Dynamic Configuration Reloading: Apply new configurations at runtime without restarting the supervisor.
+- Control Programs: Start, stop, or restart individual programs or all programs collectively with commands like start, stop, and restart.
 
-Graceful Shutdown: Handle termination signals to stop processes cleanly.
+- Reload Configuration: Apply changes from the configuration file at runtime without restarting the supervisor using the reload command.
 
-Environment Variable Support: Set custom environment variables for each managed process.
+- Graceful Shutdown: Terminate the supervisor and all managed programs cleanly with the quit command.
+
+- Help Command: Type help to view a list of available commands and their descriptions.
+<br/>
+
+<strong>YAML-based Configuration:</strong> Define multiple programs with customizable settings.
 
 <br/>
-<h3>Getting Started</h3>
-<h4>Prerequisites</h4>
-<p>- Rust (edition 2021)</p>
-<p>- Cargo package manager</p>
+<br/>
+
+<strong>Concurrent Process Management:</strong> Spawn and manage multiple processes asynchronously using Tokio.
 
 <br/>
-<h4>Build the project:</h4>
-<p><code>cargo build --release</code></p>
-create a configuration file in YAML format, i.e:
+<br/>
 
-```
-programs:
-  example_program:
-    cmd: "echo Hello, World!"
-    numprocs: 1
-    autostart: true
-    autorestart: "always"
-    startretries: 3
-    starttime: 1
-    stopsignal: "TERM"
-    stoptime: 5
-    stdout: "logs/example_program.out"
-    stderr: "logs/example_program.err"
-    env:
-      ENV_VAR: "value"
-```
+<strong>Dynamic Configuration Reloading:</strong> Apply new configurations at runtime without restarting the supervisor.
+
+<br/>
+<br/>
+
+<strong>Graceful Shutdown:</strong> Handle termination signals to stop processes cleanly.
+
+<br/>
+<br/>
+
+<strong>Environment Variable Support:</strong> Set custom environment variables for each managed process.
+
+<br/>
+<br/>
+

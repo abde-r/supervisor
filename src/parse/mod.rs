@@ -1,3 +1,3 @@
 pub mod parse;
 
-pub use parse::{Config, ProgramConfig, parser};
+pub use parse::{Config, ProgramConfig, OneOrMany, RestartPolicy, parser};

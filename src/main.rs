@@ -4,7 +4,7 @@ mod logger;
 mod shell;
 mod control;
 
-use parse::{Config, parser};
+use parse::{parser};
 use runtime::{apply_config, SupervisorState};
 use logger::{logs_tracing};
 use shell::run_shell;
@@ -16,7 +16,7 @@ use tokio::sync::RwLock;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let cfg = Arc::new(parser("config/config.yml")?);
+    let cfg = Arc::new(parser("config/config-scripts.yml")?);
     let state: SupervisorState = Arc::new(RwLock::new(HashMap::new()));
     
     let _guard = logs_tracing();
@@ -31,7 +31,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         },
         || {
-            if let Ok(new_cfg) = parser("config/config.yml") {
+            if let Ok(new_cfg) = parser("config/config-scripts.yml") {
                 futures::executor::block_on(apply_config(&new_cfg, state.clone()));
                 println!("Configuration reloaded");
             }

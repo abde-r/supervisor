@@ -5,7 +5,7 @@ use std::collections::HashMap;
 pub async fn start_program(name: &str, configs: &HashMap<String, ProgramConfig>, state: SupervisorState) {
     match configs.get(name) {
         Some(cfg) => {
-            let children = spawn_children(cfg).await;
+            let children = spawn_children(name, cfg, state.clone()).await;
             let mut map = state.write().await;
             
             let job = map.entry(name.to_string()).or_insert_with(|| RuntimeJob {
@@ -23,7 +23,8 @@ pub async fn stop_program(name: &str, state: SupervisorState) {
     let mut map = state.write().await;
 
     if let Some(mut job) = map.remove(name) {
-        for mut child in job.children.drain(..) {
+        for handle in job.children.drain(..) {
+            let mut child = handle.lock().await;
             let pid = child.id().unwrap_or(0);
             let _ = child.kill();
             println!("Stopped process {} of `{}`", pid, name);
