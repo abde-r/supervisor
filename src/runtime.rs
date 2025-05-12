@@ -1,3 +1,4 @@
+use std::fs::File;
 use crate::parse::{Config, ProgramConfig, OneOrMany, RestartPolicy};
 use tokio::process::Child;
 use std::collections::HashMap;
@@ -7,7 +8,8 @@ use tokio::sync::Mutex;
 use tokio::task::spawn_local;
 use tokio::process::Command;
 use tracing::{info, warn};
-
+use tokio::time::{sleep, Duration};
+use std::process::Stdio;
 
 pub type ChildHandle = Arc<Mutex<Child>>;
 
@@ -15,6 +17,7 @@ pub type ChildHandle = Arc<Mutex<Child>>;
 pub struct RuntimeJob {
     pub config: ProgramConfig,
     pub children: Vec<ChildHandle>,
+    pub retries_left: usize,
 }
 
 
@@ -41,11 +44,14 @@ async fn monitor_child(name: String, cfg: ProgramConfig, handle: Arc<Mutex<Child
                     "Process exited; restarting per policy"
                 );
             
+                let name_clone = name.clone();
+                let cfg_clone = cfg.clone();
+                let state_clone = state.clone();
                 spawn_local(async move {
-                    let mut replacements = spawn_children(&name, &cfg, state.clone()).await;
-                    let mut map = state.write().await;
-                    if let Some(job) = map.get_mut(&name) {
-                        job.children.extend(replacements.drain(..));
+                    let mut replacements = spawn_children(&name_clone, &cfg_clone, state_clone.clone()).await;
+                    let mut map = state_clone.write().await;
+                    if let Some(job) = map.get_mut(&name_clone) {
+                        job.children.append(&mut replacements);
                     }
                 });
             } else {
@@ -76,15 +82,41 @@ pub async fn spawn_children(name: &str, cfg: &ProgramConfig, state: SupervisorSt
     for i in 0..cfg.numprocs {
         let mut cmd = Command::new(&cfg.cmd);
         cmd.args(&cfg.args);
+
+        // Working directory
         if let Some(dir) = &cfg.workingdir {
             cmd.current_dir(dir);
         }
-        // cmd.arg("-c").arg(&cfg.cmd).current_dir(cfg.workingdir.as_deref().unwrap_or("."));
+        
+        // Env vars
         if let Some(envs) = &cfg.env {
             for (k, v) in envs {
                 cmd.env(k, v);
             }
         }
+
+        // STDOUT redirection or discard
+        if let Some(path) = &cfg.stdout {
+            if path == "null" {
+                cmd.stdout(Stdio::null());
+            } else {
+                let f = File::create(path).unwrap_or_else(|e| panic!("failed to open stdout file `{}`: {}", path, e));
+                cmd.stdout(Stdio::from(f));
+            }
+        }
+    
+        // STDERR redirection or discard
+        if let Some(path) = &cfg.stderr {
+            if path == "null" {
+                cmd.stderr(Stdio::null());
+            } else {
+                let f = File::create(path).unwrap_or_else(|e| panic!("failed to open stderr file `{}`: {}", path, e));
+                cmd.stderr(Stdio::from(f));
+            }
+        }
+
+
+        // Spawn Child
         let child = cmd.spawn().unwrap_or_else(|e| panic!("failed to spawn child `{}`: {}", cfg.cmd, e));
         info!(
             program = %cfg.cmd,
@@ -92,16 +124,33 @@ pub async fn spawn_children(name: &str, cfg: &ProgramConfig, state: SupervisorSt
             pid = child.id().unwrap_or(0),
             "Process started"
         );
+
         let handle: ChildHandle = Arc::new(Mutex::new(child));
-        let name_clone = name.clone().to_string();
+        
+        let name_clone1 = name.clone().to_string();
+        let handle_clone1 = handle.clone();
+        let grace_secs = cfg.starttime as u64;
+        
+        spawn_local(async move {
+            sleep(Duration::from_secs(grace_secs)).await;
+            let guard = handle_clone1.lock().await;
+            if guard.id().is_some() {
+                info!(
+                    program = %name_clone1,
+                    starttime = grace_secs,
+                    "Marked healthy after grace period"
+                );
+            }
+        });
+        
+        let name_clone2 = name.to_string();
+        let handle_clone2 = handle.clone();
         let cfg_clone = cfg.clone();
         let state_clone = state.clone();
-        let handle_clone = handle.clone();
-        
-        tokio::spawn(async move {
-            monitor_child(name_clone, cfg_clone, handle_clone, state_clone).await;
+
+        spawn_local(async move {
+            monitor_child(name_clone2, cfg_clone, handle_clone2, state_clone).await;
         });
-        // tokio::spawn(async move {  });
         children.push(handle);
     }
     children
@@ -188,7 +237,7 @@ pub async fn apply_config(new_cfg: &Config, state: SupervisorState) {
                         "Inserted job without starting (autostart=false)"
                     );
                 }
-                map.insert(name.clone(), RuntimeJob { config: prog_cfg.clone(), children });
+                map.insert(name.clone(), RuntimeJob { config: prog_cfg.clone(), children, retries_left: prog_cfg.startretries });
             }
         }
     }

@@ -1,0 +1,12 @@
+programs:
+  sigtester:
+    cmd: "./scripts/sigtest.sh"
+    args: []
+    numprocs: 1
+    autostart: true
+    autorestart: "never"
+    exitcodes: [0]
+    startretries: 1
+    starttime: 1
+    stopsignal: "TERM"
+    stoptime: 3    # allow up to 3s for graceful shutdown

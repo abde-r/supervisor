@@ -1,0 +1,24 @@
+programs:
+  early_fail:
+    cmd: "./scripts/fast-exit.sh"
+    args: []
+    numprocs: 1
+    autostart: true
+    autorestart: "always"
+    exitcodes: [0]
+    startretries: 2
+    starttime: 5         # grace period of 5s
+    stopsignal: "TERM"
+    stoptime: 1
+
+  late_fail:
+    cmd: "./scripts/slow-exit.sh"
+    args: []
+    numprocs: 1
+    autostart: true
+    autorestart: "always"
+    exitcodes: [0]
+    startretries: 2
+    starttime: 5         # same 5s grace period
+    stopsignal: "TERM"
+    stoptime: 1
