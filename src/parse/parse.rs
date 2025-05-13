@@ -3,9 +3,9 @@ use std::{collections::HashMap, fs};
 
 #[derive(Debug, Deserialize, Clone)]
 #[serde(untagged)]
-pub enum OneOrMany {
-    One(u32),
-    Many(Vec<u32>),
+pub enum OneOrMany<T> {
+    One(T),
+    Many(Vec<T>),
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
@@ -24,9 +24,10 @@ pub struct ProgramConfig {
     pub numprocs: usize,
     pub umask: Option<String>,
     pub workingdir: Option<String>,
+    #[serde(default)]
     pub autostart: bool,
     pub autorestart: RestartPolicy,
-    pub exitcodes: OneOrMany,
+    pub exitcodes: OneOrMany<u32>,
     pub startretries: usize,
     pub starttime: usize,
     pub stopsignal: String,

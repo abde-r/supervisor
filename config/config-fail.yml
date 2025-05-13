@@ -1,12 +1,11 @@
 programs:
-  retry_test:
+  failfast:
     cmd: "./scripts/fast-fail.sh"
     args: []
     numprocs: 1
-    autostart: true
-    autorestart: "always"       # or "unexpected"
+    autorestart: "never"
     exitcodes: [0]
-    startretries: 3             # allow exactly 3 startup retries
-    starttime: 0                # no grace period; every exit is “early”
-    stopsignal: "TERM"
-    stoptime: 1
+    startretries: 1
+    starttime: 3     # seconds
+    stoptime: 2
+    stopsignal: TERM

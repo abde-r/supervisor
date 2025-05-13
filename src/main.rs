@@ -17,58 +17,52 @@ use tokio::runtime::Builder;
 
 
 async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
-    let cfg = Arc::new(parser("config/config-sigtest.yml")?);
+    let cfg = Arc::new(parser("config/config-scripts.yml")?);
     let state: SupervisorState = Arc::new(RwLock::new(HashMap::new()));
     
     let _guard = logs_tracing();
     tracing::info!("Supervisor started!");
     apply_config(&cfg, state.clone()).await;
 
-    tokio::spawn({
-        let cfg = cfg.clone();
-        let state = state.clone();
-        async move {
-            run_shell(
-                || {
-                    let map = futures::executor::block_on(state.read());
-                    for (name, job) in map.iter() {
-                        println!("{} : {} instance(s)", name, job.children.len());
-                    }
-                },
-                || {
-                    if let Ok(new_cfg) = parser("config/config-sigtest.yml") {
-                        futures::executor::block_on(apply_config(&new_cfg, state.clone()));
-                        println!("Configuration reloaded");
-                    }
-                    else {
-                        println!("Failed to reload config");
-                    }
-                },
-                {
-                    let cfg = cfg.clone();
-                    let state = state.clone();
-                    move |name: &str| {
-                        let program_name = name.to_string();
-                        let programs = cfg.programs.clone();
-                        let state = state.clone();
-                        tokio::spawn(async move {
-                            start_program(&program_name, &programs, state).await;
-                        });
-                    }
-                },
-                {
-                    let state = state.clone();
-                    move |name: &str| {
-                        let program_name = name.to_string();
-                        let state = state.clone();
-                        tokio::spawn(async move {
-                            stop_program(&program_name, state).await;
-                        });
-                    }
-                },
-            ).await.unwrap_or_else(|e| eprintln!("shell error: {}", e));
-        }
-    });
+    let status_state = state.clone();
+    let reload_state = state.clone();
+    let start_state  = state.clone();
+    let stop_state   = state.clone();
+    let cfg_for_start = cfg.clone();
+    
+    run_shell(
+        move || {
+            let map = futures::executor::block_on(status_state.read());
+            for (name, job) in map.iter() {
+                println!("{} : {} instance(s)", name, job.children.len());
+            }
+        },
+        
+        move || {
+            if let Ok(new_cfg) = parser("config/config-scripts.yml") {
+                futures::executor::block_on(apply_config(&new_cfg, reload_state.clone()));
+                println!("Configuration reloaded");
+            } else {
+                println!("Failed to reload config");
+            }
+        },
+        
+        move |name: &str| {
+            let cfg_clone = cfg_for_start.clone();
+            let program_name = name.to_string();
+            let programs = cfg_clone.programs.clone();
+            let st       = start_state.clone();
+            futures::executor::block_on(async { start_program(&program_name, &programs, st).await; });
+        },
+        
+        move |name: &str| {
+            let name = name.to_string();
+            let state = stop_state.clone();
+            futures::executor::block_on(async { stop_program(&name, state).await; });
+        },
+    )
+    .await
+    .unwrap();
 
     Ok(())
 }

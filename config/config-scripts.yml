@@ -1,36 +1,36 @@
 programs:
-  always_prog:
+  good_exit:
     cmd: "./scripts/exit-zero.sh"
     args: []
     numprocs: 1
     autostart: true
+    startretries: 0
+    starttime: 1
+    stoptime: 1
+    stopsignal: TERM
     autorestart: "always"
     exitcodes: [0]
-    startretries: 1
-    starttime: 1
-    stopsignal: "TERM"
-    stoptime: 1
 
-  never_prog:
-    cmd: "./scripts/exit-zero.sh"
-    args: []
-    numprocs: 1
-    autostart: true
-    autorestart: "never"
-    exitcodes: [0]
-    startretries: 1
-    starttime: 1
-    stopsignal: "TERM"
-    stoptime: 1
-
-  unexpected_prog:
+  bad_exit:
     cmd: "./scripts/exit-one.sh"
     args: []
     numprocs: 1
     autostart: true
+    startretries: 0
+    starttime: 1
+    stoptime: 1
+    stopsignal: TERM
     autorestart: "unexpected"
     exitcodes: [0]
-    startretries: 1
+
+  alternate_ok_exit:
+    cmd: "./scripts/exit-two.sh"
+    args: []
+    numprocs: 1
+    autostart: true
+    startretries: 0
     starttime: 1
-    stopsignal: "TERM"
     stoptime: 1
+    stopsignal: TERM
+    autorestart: "unexpected"
+    exitcodes: [0, 2]

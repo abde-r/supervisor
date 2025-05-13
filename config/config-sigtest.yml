@@ -9,4 +9,4 @@ programs:
     startretries: 1
     starttime: 1
     stopsignal: "TERM"
-    stoptime: 3    # allow up to 3s for graceful shutdown
+    stoptime: 1    # allow up to 3s for graceful shutdown
