@@ -1,0 +1,12 @@
+programs:
+  umask_test:
+    cmd: "./scripts/check-umask.sh"
+    numprocs: 1
+    autostart: true
+    autorestart: never
+    starttime: 1
+    stoptime: 1
+    startretries: 1
+    stopsignal: TERM
+    umask: "027"          # octal 027 → new files get 750 perms
+    exitcodes: [0]

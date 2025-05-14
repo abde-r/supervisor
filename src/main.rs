@@ -17,7 +17,7 @@ use tokio::runtime::Builder;
 
 
 async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
-    let cfg = Arc::new(parser("config/config-scripts.yml")?);
+    let cfg = Arc::new(parser("config/config-umask.yml")?);
     let state: SupervisorState = Arc::new(RwLock::new(HashMap::new()));
     
     let _guard = logs_tracing();
@@ -39,7 +39,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         },
         
         move || {
-            if let Ok(new_cfg) = parser("config/config-scripts.yml") {
+            if let Ok(new_cfg) = parser("config/config-umask.yml") {
                 futures::executor::block_on(apply_config(&new_cfg, reload_state.clone()));
                 println!("Configuration reloaded");
             } else {

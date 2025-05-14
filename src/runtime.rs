@@ -12,7 +12,8 @@ use tokio::time::{sleep, Duration};
 use std::process::Stdio;
 use std::future::Future;
 use std::pin::Pin;
-
+use std::os::unix::process::CommandExt;
+use nix::libc::{umask, mode_t};
 
 pub type ChildHandle = Arc<Mutex<Child>>;
 
@@ -31,6 +32,32 @@ pub fn boxed_spawn_children(
     Box::pin(async move {
         spawn_children(&name, &cfg, state).await
     })
+}
+
+pub async fn spawn_children_with_spawner<S>(
+    name: &str,
+    cfg: &ProgramConfig,
+    state: SupervisorState,
+    spawner: std::sync::Arc<S>,
+) -> Vec<ChildHandle>
+where
+    S: ProcessSpawner + Send + Sync + 'static,
+{
+    let mut v = Vec::with_capacity(cfg.numprocs);
+    for idx in 0..cfg.numprocs {
+        let h = spawner.spawn(cfg, idx).await;
+        v.push(h);
+    }
+    v
+}
+
+/// Decide whether to restart given an exit code, policy, and list of expected codes.
+pub fn should_restart(code: u32, policy: RestartPolicy, expected: &[u32]) -> bool {
+    match policy {
+        RestartPolicy::Always => true,
+        RestartPolicy::Never  => false,
+        RestartPolicy::Unexpected => !expected.contains(&code),
+    }
 }
 
 async fn monitor_child(
@@ -143,6 +170,16 @@ pub async fn spawn_children(name: &str, cfg: &ProgramConfig, state: SupervisorSt
         }
 
 
+        // Applying umask --if exists in the child before executing the cmd
+        if let Some(umask_str) = &cfg.umask {
+            let mask = u32::from_str_radix(umask_str, 8).expect("invalid umask in config") as mode_t;
+            unsafe {
+                cmd.pre_exec(move || {
+                    umask(mask);
+                    Ok(())
+                });
+            }
+        }
         // Spawn Child
         let child = cmd.spawn().unwrap_or_else(|e| panic!("failed to spawn child `{}`: {}", cfg.cmd, e));
         info!(
