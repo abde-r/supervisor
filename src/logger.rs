@@ -2,6 +2,7 @@ use tracing_subscriber::fmt::{SubscriberBuilder};
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_appender::non_blocking::WorkerGuard;
 
+
 pub fn logs_tracing() -> WorkerGuard {
     let file_appender = RollingFileAppender::new(Rotation::DAILY, "logs", "supervisor.log");
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);

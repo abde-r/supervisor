@@ -5,17 +5,17 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio::sync::Mutex;
-use tokio::task::spawn_local;
 use tokio::process::Command;
 use tracing::{info, warn, error};
 use tokio::time::{sleep, Duration};
 use std::process::Stdio;
 use std::future::Future;
 use std::pin::Pin;
-use std::os::unix::process::CommandExt;
 use nix::libc::{umask, mode_t};
 
+
 pub type ChildHandle = Arc<Mutex<Child>>;
+
 
 // Struct for the Parsed Config content with spawned children process
 pub struct RuntimeJob {
@@ -34,22 +34,42 @@ pub fn boxed_spawn_children(
     })
 }
 
-pub async fn spawn_children_with_spawner<S>(
-    name: &str,
-    cfg: &ProgramConfig,
-    state: SupervisorState,
-    spawner: std::sync::Arc<S>,
-) -> Vec<ChildHandle>
-where
-    S: ProcessSpawner + Send + Sync + 'static,
-{
-    let mut v = Vec::with_capacity(cfg.numprocs);
-    for idx in 0..cfg.numprocs {
-        let h = spawner.spawn(cfg, idx).await;
-        v.push(h);
-    }
-    v
+
+/// So tests can inject a fake spawner.
+#[async_trait::async_trait]
+pub trait ProcessSpawner {
+    async fn spawn(
+        &self,
+        name: &str,
+        cfg: &ProgramConfig,
+        state: SupervisorState,
+        idx: usize
+    ) -> ChildHandle;
 }
+
+/// Real spawner just delegates to the built‑in one.
+pub struct RealSpawner;
+
+#[async_trait::async_trait]
+impl ProcessSpawner for RealSpawner {
+    async fn spawn(
+        &self,
+        name: &str,
+        cfg: &ProgramConfig,
+        state: SupervisorState,
+        _idx: usize
+    ) -> ChildHandle {
+        // now `state` is in scope
+        let mut children = boxed_spawn_children(
+            name.to_string(),
+            cfg.clone(),
+            state.clone()
+        ).await;
+
+        children.remove(0)
+    }
+}
+
 
 /// Decide whether to restart given an exit code, policy, and list of expected codes.
 pub fn should_restart(code: u32, policy: RestartPolicy, expected: &[u32]) -> bool {
@@ -192,7 +212,7 @@ pub async fn spawn_children(name: &str, cfg: &ProgramConfig, state: SupervisorSt
         let handle: ChildHandle = Arc::new(Mutex::new(child));
 
         // Clone everything needed
-        let name_clone1 = name.clone().to_string();
+        let name_clone1 = name.to_string();
         let handle_clone1 = handle.clone();
         let grace_secs = cfg.starttime as u64;
         let handle_for_monitor = handle.clone();
