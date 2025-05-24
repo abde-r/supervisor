@@ -1,4 +1,4 @@
-use crate::runtime::{RuntimeJob, SupervisorState, ChildHandle, boxed_spawn_children};
+use crate::runtime::{RuntimeJob, SupervisorState, ChildHandle, spawn_children};
 use crate::parse::ProgramConfig;
 use std::collections::HashMap;
 use nix::sys::signal::{kill, Signal};
@@ -9,16 +9,26 @@ use std::sync::Arc;
 use tracing::{info, warn, error};
 
 
+
+
+
+/*
+    @@@
+    @start_program();
+    . Spawns asynchronously the configured number of child processes.
+    . Acquires a write-lock on the shared supervisor state and Appends the new child handles to that job’s children list.
+    . Prints a confirmation of how many instances were started --or an error if the name wasn’t found.
+*/
 pub async fn start_program(name: &str, configs: &HashMap<String, ProgramConfig>, state: SupervisorState) {
     match configs.get(name) {
         Some(cfg) => {
-            let children = boxed_spawn_children(name.to_string(), cfg.clone(), state.clone()).await;
+            let children = spawn_children(name, cfg, state.clone()).await;
             let mut map = state.write().await;
             
             let job = map.entry(name.to_string()).or_insert_with(|| RuntimeJob {
                 config: cfg.clone(),
                 children: Vec::new(),
-                retries_left: cfg.startretries,
+                retries_left: cfg.startretries
             });
             job.children.extend(children);
             println!("Started {} instance(s) of `{}`", cfg.numprocs, name);
@@ -27,13 +37,23 @@ pub async fn start_program(name: &str, configs: &HashMap<String, ProgramConfig>,
     }
 }
 
+
+
+
+
+/*
+    @@@
+    @stop_and_cleanup();
+    . Sends the configured stop signal (like SIGTERM) to a child process.
+    . Waits for the process to exit cleanly within a timeout --kills it forcefully (SIGKILL) if it doesn't exit in time.
+    . Removes the process handle from the job’s list of children and logs relevant actions and errors during the process.
+*/
 pub async fn stop_and_cleanup(
     name: &str,
     cfg: &ProgramConfig,
     handle: &ChildHandle,
     job: &mut RuntimeJob,
 ) {
-    // 1) Send graceful stop
     if let Some(pid) = handle.lock().await.id() {
         let sig = match cfg.stopsignal.to_uppercase().as_str() {
             "TERM" | "SIGTERM" => Signal::SIGTERM,
@@ -48,7 +68,6 @@ pub async fn stop_and_cleanup(
         }
     }
 
-    // 2) Wait up to stoptime
     let timeout = Duration::from_secs(cfg.stoptime as u64);
     let mut elapsed = Duration::ZERO;
     while elapsed < timeout {
@@ -56,7 +75,6 @@ pub async fn stop_and_cleanup(
             let mut guard = handle.lock().await;
             if let Ok(Some(status)) = guard.try_wait() {
                 info!(program=%name, exit_code=?status.code(), "exited cleanly");
-                // 4a) Remove and return
                 job.children.retain(|h| !Arc::ptr_eq(h, handle));
                 info!(program=%name, "removed; {} remaining", job.children.len());
                 return;
@@ -66,7 +84,6 @@ pub async fn stop_and_cleanup(
         elapsed += Duration::from_millis(100);
     }
 
-    // 3) Force‐kill
     {
         let mut guard = handle.lock().await;
         if let Err(e) = guard.kill().await {
@@ -76,35 +93,33 @@ pub async fn stop_and_cleanup(
         }
     }
 
-    // 4b) Remove handle
     job.children.retain(|h| !Arc::ptr_eq(h, handle));
     info!(program=%name, "removed; {} remaining", job.children.len());
 }
 
 
+
+
+
+/*
+    @@@
+    @stop_program();
+    . Stops asynchronously and cleans up each child via stop_and_cleanup.
+    . Acquires a write-lock on the shared state and removes the RuntimeJob for name --if exists.
+    . Reinserts the (now-updated) RuntimeJob back into the map --or an error if the name wasn’t found.
+*/
 pub async fn stop_program(name: &str, state: SupervisorState) {
-    // Acquire write lock on the map
     let mut map = state.write().await;
 
-    // Remove the job so we own it (and can mutate it freely)
     if let Some(mut job) = map.remove(name) {
         let cfg = job.config.clone();
 
-        // 1) Take its children vector (now job.children is empty)
         let handles = std::mem::take(&mut job.children);
-
-        // 2) For each handle, stop it and clean up
         for handle in handles {
             stop_and_cleanup(name, &cfg, &handle, &mut job).await;
         }
-
-        // 3) If you want to keep the job around for further commands, re-insert it
-        //    (with its now-empty children vector and modified config)
         map.insert(name.to_string(), job);
-
     } else {
         println!("No such program: {}", name);
     }
 }
-
-

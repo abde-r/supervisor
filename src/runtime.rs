@@ -1,21 +1,20 @@
-use std::fs::File;
 use crate::parse::{Config, ProgramConfig, OneOrMany, RestartPolicy};
-use tokio::process::Child;
+use tokio::process::{Child, Command};
+use tokio::sync::{RwLock, Mutex};
+use tokio::spawn;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::RwLock;
-use tokio::sync::Mutex;
-use tokio::process::Command;
-use tracing::{info, warn, error};
-use tokio::time::{sleep, Duration};
 use std::process::Stdio;
-use std::future::Future;
-use std::pin::Pin;
+use std::fs::File;
+use tracing::{info, warn};
 use nix::libc::{umask, mode_t};
 
 
 pub type ChildHandle = Arc<Mutex<Child>>;
 
+// Shared map of Runtime data
+// Updated each time the config data changes
+pub type SupervisorState = Arc<RwLock<HashMap<String, RuntimeJob>>>;
 
 // Struct for the Parsed Config content with spawned children process
 pub struct RuntimeJob {
@@ -24,152 +23,104 @@ pub struct RuntimeJob {
     pub retries_left: usize,
 }
 
-pub fn boxed_spawn_children(
-    name: String,
-    cfg: ProgramConfig,
-    state: SupervisorState,
-) -> Pin<Box<dyn Future<Output = Vec<ChildHandle>> + Send>> {
-    Box::pin(async move {
-        spawn_children(&name, &cfg, state).await
-    })
-}
 
 
-/// So tests can inject a fake spawner.
-#[async_trait::async_trait]
-pub trait ProcessSpawner {
-    async fn spawn(
-        &self,
-        name: &str,
-        cfg: &ProgramConfig,
-        state: SupervisorState,
-        idx: usize
-    ) -> ChildHandle;
-}
-
-/// Real spawner just delegates to the built‑in one.
-pub struct RealSpawner;
-
-#[async_trait::async_trait]
-impl ProcessSpawner for RealSpawner {
-    async fn spawn(
-        &self,
-        name: &str,
-        cfg: &ProgramConfig,
-        state: SupervisorState,
-        _idx: usize
-    ) -> ChildHandle {
-        // now `state` is in scope
-        let mut children = boxed_spawn_children(
-            name.to_string(),
-            cfg.clone(),
-            state.clone()
-        ).await;
-
-        children.remove(0)
-    }
-}
 
 
-/// Decide whether to restart given an exit code, policy, and list of expected codes.
-pub fn should_restart(code: u32, policy: RestartPolicy, expected: &[u32]) -> bool {
-    match policy {
-        RestartPolicy::Always => true,
-        RestartPolicy::Never  => false,
-        RestartPolicy::Unexpected => !expected.contains(&code),
-    }
-}
-
-async fn monitor_child(
-    name: String,
-    cfg: ProgramConfig,
-    handle: Arc<Mutex<Child>>,
-    state: SupervisorState,
-) {
-    // 1) Wait for the process to exit, then drop the lock immediately.
-    let status = {
-        let mut child = handle.lock().await;
-        child.wait().await.unwrap_or_else(|e| {
-            warn!(program=%name, error=%e, "Failed to await child");
-            // We bail out if we can't wait
-            std::process::exit(1);
-        })
-    };
-
-    let code = status.code().unwrap_or(-1) as u32;
-    let expected = match &cfg.exitcodes {
-        OneOrMany::One(n)   => vec![*n],
-        OneOrMany::Many(vs) => vs.clone(),
-    };
-
-    // 2) Log expected vs. unexpected
-    if expected.contains(&code) {
-        info!(program=%name, code, "Exited with expected code");
-    } else {
-        error!(program=%name, code, "Unexpected exit");
-    }
-
-    // 3) Remove the dead handle from supervision immediately
-    {
+/*
+    @@@
+    @schedule_spawn();
+    . Fires off a background task to respawn a child and merge the new handles into the shared state.
+*/
+fn schedule_spawn(name: String, cfg: ProgramConfig, state: SupervisorState) {
+    spawn(async move {
+        let mut replacements = spawn_children(&name, &cfg, state.clone()).await;
         let mut map = state.write().await;
         if let Some(job) = map.get_mut(&name) {
-            job.children.retain(|h| !Arc::ptr_eq(h, &handle));
+            job.children.extend(replacements.drain(..));
         }
-    }
+    });
+}
 
-    // 4) Decide whether to restart
-    let should_restart = match cfg.autorestart {
-        RestartPolicy::Always     => true,
-        RestartPolicy::Never      => false,
-        RestartPolicy::Unexpected => !expected.contains(&code),
-    };
 
-    if should_restart {
-        warn!(program=%name, exit_code=code, "Restarting per policy");
-        let name_clone  = name.clone();
-        let cfg_clone   = cfg.clone();
-        let state_clone = state.clone();
 
-        // Use tokio::spawn so this monitor can be Send + 'static
-        tokio::spawn(async move {
-            info!(program=%name_clone, "Spawning replacement for unexpected exit");
-            let mut replacements = boxed_spawn_children(name.clone(), cfg_clone, state_clone.clone()).await;
-            let mut map = state_clone.write().await;
-            if let Some(job) = map.get_mut(&name_clone) {
-                job.children.append(&mut replacements);
+
+
+/*
+    @@@
+    @monitor_child();
+    . Locks and waits on one child process, checks its exit code against the configured policy.
+    . The 'wait().await' is the only place where anything actually "sleeps". It suspends that spawned task until the OS process exits.
+    . kicks off a local respawn that updates the shared supervisor state --if needed.
+*/
+async fn monitor_child(name: String, cfg: ProgramConfig, handle: Arc<Mutex<Child>>, state: SupervisorState) {
+    let mut child = handle.lock().await;
+    match child.wait().await {
+        Ok(status) => {
+            let code = status.code().unwrap_or(-1) as u32;
+            let expected = match &cfg.exitcodes {
+                OneOrMany::One(n) => vec![*n],
+                OneOrMany::Many(vs) => vs.clone(),
+            };
+        
+            let should_restart = match cfg.autorestart {
+                RestartPolicy::Always => true,
+                RestartPolicy::Never => false,
+                RestartPolicy::Unexpected => !expected.contains(&code),
+            };
+        
+            if should_restart {
+                warn!(
+                    program = %name,
+                    exit_code = code,
+                    "Process exited; restarting per policy"
+                );
+                schedule_spawn(name, cfg, state);
+            } else {
+                info!(
+                    program = %name,
+                    exit_code = code,
+                    "Process exited; not restarting per policy"
+                );
             }
-        });
-    } else {
-        info!(program=%name, exit_code=code, "Not restarting per policy");
+        }
+        Err(e) => {
+            warn!(
+                program = %name,
+                error = %e,
+                "Failed to await child"
+            );
+        }
     }
 }
 
 
 
-// Shared map of Runtime data
-// Updated each time the config data changes
-pub type SupervisorState = Arc<RwLock<HashMap<String, RuntimeJob>>>;
 
+
+/*
+    @@@
+    @spawn_children();
+    . Builds a command —-applying cwd, env, I/O redirection, and umask-— and wraps each child in an array of mutexes.
+    . Detaches a tokio::spawn monitor task per process to await exit, update state, and restart if needed.
+    . Returns all child handles without blocking.
+*/
 pub async fn spawn_children(name: &str, cfg: &ProgramConfig, state: SupervisorState) -> Vec<ChildHandle> {
     let mut children = Vec::with_capacity(cfg.numprocs);
-    info!("About to spawn: {:?} {:?} {:?}", &cfg.cmd, &cfg.args, &cfg.numprocs);
     for i in 0..cfg.numprocs {
         let mut cmd = Command::new(&cfg.cmd);
         cmd.args(&cfg.args);
 
-        // Working directory
         if let Some(dir) = &cfg.workingdir {
             cmd.current_dir(dir);
         }
-        
-        // Env vars
+
         if let Some(envs) = &cfg.env {
             for (k, v) in envs {
                 cmd.env(k, v);
             }
         }
 
-        // STDOUT redirection or discard
         if let Some(path) = &cfg.stdout {
             if path == "null" {
                 cmd.stdout(Stdio::null());
@@ -179,7 +130,6 @@ pub async fn spawn_children(name: &str, cfg: &ProgramConfig, state: SupervisorSt
             }
         }
     
-        // STDERR redirection or discard
         if let Some(path) = &cfg.stderr {
             if path == "null" {
                 cmd.stderr(Stdio::null());
@@ -189,8 +139,6 @@ pub async fn spawn_children(name: &str, cfg: &ProgramConfig, state: SupervisorSt
             }
         }
 
-
-        // Applying umask --if exists in the child before executing the cmd
         if let Some(umask_str) = &cfg.umask {
             let mask = u32::from_str_radix(umask_str, 8).expect("invalid umask in config") as mode_t;
             unsafe {
@@ -200,7 +148,7 @@ pub async fn spawn_children(name: &str, cfg: &ProgramConfig, state: SupervisorSt
                 });
             }
         }
-        // Spawn Child
+
         let child = cmd.spawn().unwrap_or_else(|e| panic!("failed to spawn child `{}`: {}", cfg.cmd, e));
         info!(
             program = %cfg.cmd,
@@ -208,99 +156,32 @@ pub async fn spawn_children(name: &str, cfg: &ProgramConfig, state: SupervisorSt
             pid = child.id().unwrap_or(0),
             "Process started"
         );
-
         let handle: ChildHandle = Arc::new(Mutex::new(child));
-
-        // Clone everything needed
-        let name_clone1 = name.to_string();
-        let handle_clone1 = handle.clone();
-        let grace_secs = cfg.starttime as u64;
-        let handle_for_monitor = handle.clone();
-        let name_for_monitor = name.to_string();
-        let cfg_for_monitor = cfg.clone();
-        let state_for_monitor = state.clone();
-
-        tokio::spawn(async move {
-            let interval = Duration::from_millis(100);
-            let mut elapsed = Duration::ZERO;
-            let grace = Duration::from_secs(grace_secs);
+        let name_clone = name.to_string();
+        let cfg_clone = cfg.clone();
+        let state_clone = state.clone();
+        let handle_clone = handle.clone();
         
-            while elapsed < grace {
-                let exited_early = {
-                    let mut guard = handle_clone1.lock().await;
-                    match guard.try_wait() {
-                        Ok(Some(status)) => {
-                            error!(
-                                program = %name_clone1,
-                                code = %status.code().unwrap_or(-1),
-                                "Exited before reaching starttime ({}s)", grace_secs
-                            );
-                            true
-                        }
-                        Ok(None) => false,
-                        Err(e) => {
-                            error!(
-                                program = %name_clone1,
-                                error = %e,
-                                "Error checking child status"
-                            );
-                            true
-                        }
-                    }
-                };
-        
-                if exited_early {
-                    // Remove the handle from state
-                    {
-                        let mut map = state_for_monitor.write().await;
-                        if let Some(job) = map.get_mut(&name_clone1) {
-                            job.children.retain(|h| !Arc::ptr_eq(h, &handle_clone1));
-                        }
-                    }
-        
-                    // Respawn immediately if policy is Unexpected
-                    if let RestartPolicy::Unexpected = cfg_for_monitor.autorestart {
-                        info!(program = %name_clone1, "Early exit — respawning (Unexpected policy)");
-                        let new_children = boxed_spawn_children(
-                            name_clone1.clone(),
-                            cfg_for_monitor.clone(),
-                            state_for_monitor.clone(),
-                        )
-                        .await;
-                        let mut map = state_for_monitor.write().await;
-                        if let Some(job) = map.get_mut(&name_clone1) {
-                            job.children.extend(new_children);
-                        }
-                    }
-                    return;
-                }
-        
-                sleep(interval).await;
-                elapsed += interval;
-            }
-        
-            // Passed grace period — monitor normally
-            info!(
-                program = %name_clone1,
-                starttime = grace_secs,
-                "Marked healthy after grace period"
-            );
-            tokio::spawn(async move {
-                monitor_child(
-                    name_for_monitor,
-                    cfg_for_monitor,
-                    handle_for_monitor,
-                    state_for_monitor,
-                )
-                .await;
-            });
+        spawn(async move {
+            monitor_child(name_clone, cfg_clone, handle_clone, state_clone).await;
         });
-
         children.push(handle);
     }
     children
 }
 
+
+
+
+
+
+/*
+    @@@
+    @apply_config();
+    . Stops and removes jobs no longer in the Config.
+    . Updates running jobs by scaling them up or down to match the new numprocs.
+    . Adds new jobs --autostarting them if configured.
+*/
 pub async fn apply_config(new_cfg: &Config, state: SupervisorState) {
     info!(
         "Applying new configuration with {} programs",
@@ -308,7 +189,6 @@ pub async fn apply_config(new_cfg: &Config, state: SupervisorState) {
     );
     let mut map = state.write().await;
 
-    // Stoping and Removing jobs no longer in the Config
     let to_remove: Vec<String> = map.keys()
         .filter(|name| !new_cfg.programs.contains_key(*name))
         .cloned()
@@ -327,15 +207,13 @@ pub async fn apply_config(new_cfg: &Config, state: SupervisorState) {
         }
     }
 
-    // Adding and Updating jobs
     for (name, prog_cfg) in &new_cfg.programs {
         match map.get_mut(name) {
             Some(rt_job) => {
                 let current = rt_job.children.len();
-                rt_job.retries_left = prog_cfg.startretries;
                 let desired = prog_cfg.numprocs;
                 if desired > current {
-                    let mut extras = boxed_spawn_children(name.clone(), prog_cfg.clone(), state.clone()).await;
+                    let mut extras = spawn_children(name, &prog_cfg, state.clone()).await;
                     for handle in &extras {
                         info!(
                             program = %name,
@@ -367,7 +245,7 @@ pub async fn apply_config(new_cfg: &Config, state: SupervisorState) {
         
                 let mut children = Vec::new();
                 if prog_cfg.autostart {
-                    let new_children = boxed_spawn_children(name.clone(), prog_cfg.clone(), state.clone()).await;
+                    let new_children = spawn_children(name, prog_cfg, state.clone()).await;
                     for handle in &new_children {
                         info!(
                             program = %name,
