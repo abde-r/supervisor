@@ -7,6 +7,7 @@ use std::time::Duration;
 use tokio::time::sleep;
 use std::sync::Arc;
 use tracing::{info, warn, error};
+use std::os::unix::process::ExitStatusExt;
 
 
 
@@ -28,7 +29,7 @@ pub async fn start_program(name: &str, configs: &HashMap<String, ProgramConfig>,
             let job = map.entry(name.to_string()).or_insert_with(|| RuntimeJob {
                 config: cfg.clone(),
                 children: Vec::new(),
-                retries_left: cfg.startretries
+                retries_left: cfg.startretries,
             });
             job.children.extend(children);
             println!("Started {} instance(s) of `{}`", cfg.numprocs, name);
@@ -68,13 +69,19 @@ pub async fn stop_and_cleanup(
         }
     }
 
-    let timeout = Duration::from_secs(cfg.stoptime as u64);
+    let timeout = Duration::from_secs(3 as u64);
     let mut elapsed = Duration::ZERO;
     while elapsed < timeout {
         {
             let mut guard = handle.lock().await;
             if let Ok(Some(status)) = guard.try_wait() {
-                info!(program=%name, exit_code=?status.code(), "exited cleanly");
+                if let Some(code) = status.code() {
+                    info!(program = %name, exit_code = code, "exited cleanly");
+                }
+                if let Some(sig) = status.signal() {
+                    info!(program = %name, signal = sig, "process exited due to signal");
+                }
+
                 job.children.retain(|h| !Arc::ptr_eq(h, handle));
                 info!(program=%name, "removed; {} remaining", job.children.len());
                 return;

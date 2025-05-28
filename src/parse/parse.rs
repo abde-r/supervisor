@@ -39,7 +39,7 @@ pub struct ProgramConfig {
     #[serde(default)]
     pub startretries: usize,
     #[serde(default)]
-    pub starttime: usize,
+    pub starttime: u64,
     #[serde(default)]
     pub stopsignal: String,
     #[serde(default)]

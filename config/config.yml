@@ -1,5 +1,79 @@
 programs:
-  simple_program:
-    cmd: "echo"
-    args: ["Hello ", "World 1!"]
+  # instance_numproc:
+  #   cmd: "echo"
+  #   args: ["Hello ", "World 1!"]
+  #   numprocs: 1
+  
+  # # the instance is not starting when false until start it in the program.
+  # instance_autostart:
+  #   cmd: "/usr/sbin/nginx"
+  #   args: []
+  #   numprocs: 1
+  #   autostart: false
+  #   stdout: /tmp/nginx.stdout
+  #   stderr: /tmp/nginx.stderr  
+
+  # # After exit, the instance is not re-starting when never, re-starting when always or if exits a code not listed in exitcodes.
+  # instance_autorestart_always:
+  #   cmd: "./scripts/exit.sh"
+  #   args: []
+  #   numprocs: 1
+  #   # autostart: false
+  #   autorestart: "always"
+  # instance_autorestart_never:
+  #   cmd: "./scripts/exit.sh"
+  #   args: []
+  #   numprocs: 1
+  #   autorestart: "never"
+  # instance_autorestart_unexpected_false:
+  #   cmd: "./scripts/exit.sh"
+  #   args: []
+  #   numprocs: 1
+  #   # autostart: false
+  #   autorestart: "unexpected"
+  # instance_autorestart_unexpected_true:
+  #   cmd: "./scripts/exit.sh"
+  #   args: []
+  #   numprocs: 1
+  #   autorestart: "unexpected"
+  #   exitcodes: [1]
+
+  # --------------------------------
+  # After exit, the instance re-starts only if exits a code not listed in exitcodes and autorestart is 'unexpected'.
+  # --------------------------------
+  # instance_exit_code_true:
+  #   cmd: "./scripts/exit.sh"
+  #   args: []
+  #   numprocs: 1
+  #   autorestart: "unexpected"
+  #   exitcodes: [1,2]
+  # instance_exit_code_false:
+  #   cmd: "./scripts/exit.sh"
+  #   args: []
+  #   numprocs: 1
+  #   autorestart: "unexpected"
+  #   exitcodes: [0,2]
+  
+  # --------------------------------
+  # instance_starttime
+  # --------------------------------
+  # instance_starttime:
+  #   cmd: "./scripts/wait.sh"
+  #   args: []
+  #   numprocs: 1
+  #   starttime: 3
+
+  # --------------------------------
+  # # The program is killed cleanly
+  # instance_sigint:
+  #   cmd: "sleep"
+  #   args: ["10"]
+  #   numprocs: 1
+  #   stopsignal: INT
+  
+  # The program is killed cleanly
+  instance_sigquit:
+    cmd: "sleep"
+    args: ["10"]
     numprocs: 1
+    stopsignal: QUIT

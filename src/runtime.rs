@@ -8,6 +8,8 @@ use std::process::Stdio;
 use std::fs::File;
 use tracing::{info, warn};
 use nix::libc::{umask, mode_t};
+use tokio::time::{sleep, Duration};
+use tracing::error;
 
 
 pub type ChildHandle = Arc<Mutex<Child>>;
@@ -43,7 +45,16 @@ fn schedule_spawn(name: String, cfg: ProgramConfig, state: SupervisorState) {
 }
 
 
-
+/// Helper to respawn from anywhere
+fn schedule_respawn(name: String, cfg: ProgramConfig, state: SupervisorState) {
+    tokio::spawn(async move {
+        let mut replacements = spawn_children(&name, &cfg, state.clone()).await;
+        let mut map = state.write().await;
+        if let Some(job) = map.get_mut(&name) {
+            job.children.append(&mut replacements);
+        }
+    });
+}
 
 
 /*
@@ -156,13 +167,54 @@ pub async fn spawn_children(name: &str, cfg: &ProgramConfig, state: SupervisorSt
             pid = child.id().unwrap_or(0),
             "Process started"
         );
+
         let handle: ChildHandle = Arc::new(Mutex::new(child));
         let name_clone = name.to_string();
         let cfg_clone = cfg.clone();
         let state_clone = state.clone();
         let handle_clone = handle.clone();
-        
-        spawn(async move {
+        // spawn(async move {
+        //     monitor_child(name_clone, cfg_clone, handle_clone, state_clone).await;
+        // });
+        tokio::spawn(async move {
+            let grace = Duration::from_secs(3);
+            let mut elapsed = Duration::ZERO;
+            let check_interval = Duration::from_millis(100);
+
+            println!("{:?}", grace);
+            // println!("{}", elapsed);
+
+            // Poll for early exit during the grace period
+            loop {
+                if elapsed >= grace {
+                    break;  // survived startup
+                }
+                {
+                    let mut child_guard = handle_clone.lock().await;
+                    if let Ok(Some(status)) = child_guard.try_wait() {
+                        // Exited too early!
+                        error!(
+                            program = %name_clone,
+                            code = %status.code().unwrap_or(-1),
+                            "Crashed within {}s startup window", cfg_clone.starttime
+                        );
+                        // Remove from state
+                        let mut map = state_clone.write().await;
+                        if let Some(job) = map.get_mut(&name_clone) {
+                            job.children.retain(|h| !Arc::ptr_eq(h, &handle_clone));
+                        }
+                        // If policy == Unexpected, respawn immediately
+                        if let RestartPolicy::Unexpected = cfg_clone.autorestart {
+                            schedule_respawn(name_clone.clone(), cfg_clone.clone(), state_clone.clone());
+                        }
+                        return;
+                    }
+                }
+                sleep(check_interval).await;
+                elapsed += check_interval;
+            }
+
+            // 2) After grace period, hand off to the normal monitor
             monitor_child(name_clone, cfg_clone, handle_clone, state_clone).await;
         });
         children.push(handle);
