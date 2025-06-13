@@ -73,7 +73,7 @@ where
     let _ = rl.load_history("logs/history.txt");
 
     loop {
-        let line = rl.readline("supervisor> ");
+        let line = rl.readline("task-slave> ");
         match line {
             Ok(line) => {
                 let input = line.trim();

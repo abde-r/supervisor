@@ -8,7 +8,7 @@ use tokio::time::sleep;
 use std::sync::Arc;
 use tracing::{info, warn, error};
 use std::os::unix::process::ExitStatusExt;
-
+use nix::sys::signal::killpg;
 
 
 
@@ -55,54 +55,58 @@ pub async fn stop_and_cleanup(
     handle: &ChildHandle,
     job: &mut RuntimeJob,
 ) {
-    if let Some(pid) = handle.lock().await.id() {
+    // 1) Acquire lock just to read PID, then drop immediately:
+    let pid_opt = {
+        let child = handle.lock().await;
+        child.id().map(|u| u as i32)
+    };
+    println!("i'm here"); // No longer blocks
+
+    if let Some(pid) = pid_opt {
         let sig = match cfg.stopsignal.to_uppercase().as_str() {
             "TERM" | "SIGTERM" => Signal::SIGTERM,
-            "INT"  | "SIGINT"  => Signal::SIGINT,
+            "INT" | "SIGINT"   => Signal::SIGINT,
             "QUIT" | "SIGQUIT" => Signal::SIGQUIT,
             "USR1" | "SIGUSR1" => Signal::SIGUSR1,
             _                  => Signal::SIGTERM,
         };
-        tracing::info!(program=%name, pid, signal=?sig, "sending stop signal");
-        if let Err(e) = kill(Pid::from_raw(pid as i32), sig) {
-            tracing::error!(program=%name, error=%e, "failed to send {}", sig);
+        warn!(program=%name, pid, signal=?sig, "sending stop signal");
+        // Send SIG to the whole process group, not just one PID:
+        let pgid = Pid::from_raw(-pid);
+        if let Err(e) = killpg(pgid, sig) {
+            error!(program=%name, error=?e, "failed to send {}", sig);
         }
     }
 
-    let timeout = Duration::from_secs(3 as u64);
+    // 2) Now wait up to stoptime for the child to exit, but lock only briefly:
+    let timeout = Duration::from_secs(cfg.stoptime as u64);
     let mut elapsed = Duration::ZERO;
+    let check_interval = Duration::from_millis(100);
+
     while elapsed < timeout {
-        {
+        let has_exited = {
             let mut guard = handle.lock().await;
-            if let Ok(Some(status)) = guard.try_wait() {
-                if let Some(code) = status.code() {
-                    info!(program = %name, exit_code = code, "exited cleanly");
-                }
-                if let Some(sig) = status.signal() {
-                    info!(program = %name, signal = sig, "process exited due to signal");
-                }
+            guard.try_wait().unwrap_or(Some(std::process::ExitStatus::from_raw(-1))).is_some()
+        }; // guard dropped here
 
-                job.children.retain(|h| !Arc::ptr_eq(h, handle));
-                info!(program=%name, "removed; {} remaining", job.children.len());
-                return;
-            }
+        if has_exited {
+            // child is gone; remove from job.children and return
+            job.children.retain(|h| !Arc::ptr_eq(h, handle));
+            return;
         }
-        sleep(Duration::from_millis(100)).await;
-        elapsed += Duration::from_millis(100);
+
+        sleep(check_interval).await;
+        elapsed += check_interval;
     }
 
-    {
-        let mut guard = handle.lock().await;
-        if let Err(e) = guard.kill().await {
-            error!(program=%name, error=%e, "failed to SIGKILL");
-        } else {
-            warn!(program=%name, "sent SIGKILL after timeout");
-        }
+    // 3) If it still hasn’t exited, force‐kill the pgid:
+    if let Some(pid) = pid_opt {
+        let pgid = Pid::from_raw(-pid);
+        let _ = killpg(pgid, Signal::SIGKILL);
+        job.children.retain(|h| !Arc::ptr_eq(h, handle));
     }
-
-    job.children.retain(|h| !Arc::ptr_eq(h, handle));
-    info!(program=%name, "removed; {} remaining", job.children.len());
 }
+
 
 
 

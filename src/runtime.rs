@@ -64,29 +64,101 @@ fn schedule_respawn(name: String, cfg: ProgramConfig, state: SupervisorState) {
     . The 'wait().await' is the only place where anything actually "sleeps". It suspends that spawned task until the OS process exits.
     . kicks off a local respawn that updates the shared supervisor state --if needed.
 */
-async fn monitor_child(name: String, cfg: ProgramConfig, handle: Arc<Mutex<Child>>, state: SupervisorState) {
-    let mut child = handle.lock().await;
-    match child.wait().await {
-        Ok(status) => {
+async fn monitor_child(
+    name: String,
+    cfg: ProgramConfig,
+    handle: ChildHandle,
+    state: SupervisorState,
+) {
+    // 1) Handle the “grace period” at startup
+    let grace_secs = cfg.starttime as u64;
+    let grace_duration = Duration::from_secs(grace_secs);
+    let mut elapsed = Duration::ZERO;
+    let check_interval = Duration::from_millis(100);
+
+    while elapsed < grace_duration {
+        // 1a) Lock only to check if child already exited early
+        let early_exit = {
+            let mut child_guard = handle.lock().await;
+            match child_guard.try_wait() {
+                Ok(Some(status)) => {
+                    let code = status.code().unwrap_or(-1) as u32;
+                    error!(
+                        program = %name,
+                        code,
+                        "Exited within {}s startup window",
+                        grace_secs
+                    );
+                    true
+                }
+                _ => false,
+            }
+        };
+
+        if early_exit {
+            // Remove it from state:
+            let mut map = state.write().await;
+            if let Some(job) = map.get_mut(&name) {
+                job.children.retain(|h| !Arc::ptr_eq(h, &handle));
+            }
+            // If policy == Unexpected, respawn immediately:
+            if let RestartPolicy::Unexpected = cfg.autorestart {
+                schedule_respawn(name.clone(), cfg.clone(), state.clone());
+            }
+            return;
+        }
+
+        // 1b) Drop lock, then sleep
+        sleep(check_interval).await;
+        elapsed += check_interval;
+    }
+
+    // 2) If we reach here, child survived the “grace” → now do the normal “wait until exit” pattern:
+    loop {
+        // 2a) Check if child exited:
+        let maybe_status = {
+            let mut child_guard = handle.lock().await;
+            child_guard.try_wait().unwrap_or(None)
+        };
+        if let Some(status) = maybe_status {
             let code = status.code().unwrap_or(-1) as u32;
             let expected = match &cfg.exitcodes {
                 OneOrMany::One(n) => vec![*n],
                 OneOrMany::Many(vs) => vs.clone(),
             };
-        
+
+            // Remove from state:
+            {
+                let mut map = state.write().await;
+                if let Some(job) = map.get_mut(&name) {
+                    job.children.retain(|h| !Arc::ptr_eq(h, &handle));
+                }
+            }
+
+            // Decide restart:
             let should_restart = match cfg.autorestart {
                 RestartPolicy::Always => true,
                 RestartPolicy::Never => false,
                 RestartPolicy::Unexpected => !expected.contains(&code),
             };
-        
+
             if should_restart {
-                warn!(
-                    program = %name,
-                    exit_code = code,
-                    "Process exited; restarting per policy"
-                );
-                schedule_spawn(name, cfg, state);
+                let mut map = state.write().await;
+                if let Some(job) = map.get_mut(&name) {
+                    if job.retries_left == 0 {
+                        error!(program=%name, "Retry limit reached; not restarting");
+                    } else {
+                        job.retries_left -= 1;
+                        warn!(
+                            program = %name,
+                            remaining = job.retries_left,
+                            "restarting per policy; {} retries left",
+                            job.retries_left
+                        );
+                        drop(map);
+                        schedule_spawn(name.clone(), cfg.clone(), state.clone());
+                    }
+                }
             } else {
                 info!(
                     program = %name,
@@ -94,16 +166,14 @@ async fn monitor_child(name: String, cfg: ProgramConfig, handle: Arc<Mutex<Child
                     "Process exited; not restarting per policy"
                 );
             }
+            return;
         }
-        Err(e) => {
-            warn!(
-                program = %name,
-                error = %e,
-                "Failed to await child"
-            );
-        }
+
+        // 2b) Drop lock, then sleep
+        sleep(check_interval).await;
     }
 }
+
 
 
 
@@ -132,23 +202,46 @@ pub async fn spawn_children(name: &str, cfg: &ProgramConfig, state: SupervisorSt
             }
         }
 
-        if let Some(path) = &cfg.stdout {
-            if path == "null" {
-                cmd.stdout(Stdio::null());
-            } else {
-                let f = File::create(path).unwrap_or_else(|e| panic!("failed to open stdout file `{}`: {}", path, e));
-                cmd.stdout(Stdio::from(f));
-            }
-        }
+        // if let Some(path) = &cfg.stdout {
+        //     if path == "null" {
+        //         cmd.stdout(Stdio::null());
+        //     } else {
+        //         let f = File::create(path).unwrap_or_else(|e| panic!("failed to open stdout file `{}`: {}", path, e));
+        //         cmd.stdout(Stdio::from(f));
+        //     }
+        // }
     
-        if let Some(path) = &cfg.stderr {
-            if path == "null" {
-                cmd.stderr(Stdio::null());
-            } else {
-                let f = File::create(path).unwrap_or_else(|e| panic!("failed to open stderr file `{}`: {}", path, e));
-                cmd.stderr(Stdio::from(f));
+        // if let Some(path) = &cfg.stderr {
+        //     if path == "null" {
+        //         cmd.stderr(Stdio::null());
+        //     } else {
+        //         let f = File::create(path).unwrap_or_else(|e| panic!("failed to open stderr file `{}`: {}", path, e));
+        //         cmd.stderr(Stdio::from(f));
+        //     }
+        // }
+        let stdout_cfg = cfg.stdout.as_deref();
+        let stdout_stdio = match stdout_cfg {
+            Some("null")       => Stdio::null(),
+            Some(path)         => {
+                let f = File::create(path)
+                    .unwrap_or_else(|e| panic!("failed to open stdout file `{}`: {}", path, e));
+                Stdio::from(f)
             }
-        }
+            None               => Stdio::null(),
+        };
+        cmd.stdout(stdout_stdio);
+
+        let stderr_cfg = cfg.stderr.as_deref();
+        let stderr_stdio = match stderr_cfg {
+            Some("null")       => Stdio::null(),
+            Some(path)         => {
+                let f = File::create(path)
+                    .unwrap_or_else(|e| panic!("failed to open stderr file `{}`: {}", path, e));
+                Stdio::from(f)
+            }
+            None               => Stdio::null(),
+        };
+        cmd.stderr(stderr_stdio);
 
         if let Some(umask_str) = &cfg.umask {
             let mask = u32::from_str_radix(umask_str, 8).expect("invalid umask in config") as mode_t;
@@ -164,6 +257,7 @@ pub async fn spawn_children(name: &str, cfg: &ProgramConfig, state: SupervisorSt
         info!(
             program = %cfg.cmd,
             index = i,
+            program = name,
             pid = child.id().unwrap_or(0),
             "Process started"
         );
@@ -177,27 +271,17 @@ pub async fn spawn_children(name: &str, cfg: &ProgramConfig, state: SupervisorSt
         //     monitor_child(name_clone, cfg_clone, handle_clone, state_clone).await;
         // });
         tokio::spawn(async move {
-            let grace = Duration::from_secs(3);
+            let grace_sec = cfg_clone.starttime as u64;
+            let grace = Duration::from_secs(grace_sec);
             let mut elapsed = Duration::ZERO;
             let check_interval = Duration::from_millis(100);
 
-            println!("{:?}", grace);
-            // println!("{}", elapsed);
-
-            // Poll for early exit during the grace period
-            loop {
-                if elapsed >= grace {
-                    break;  // survived startup
-                }
+            while elapsed < grace {
                 {
                     let mut child_guard = handle_clone.lock().await;
                     if let Ok(Some(status)) = child_guard.try_wait() {
                         // Exited too early!
-                        error!(
-                            program = %name_clone,
-                            code = %status.code().unwrap_or(-1),
-                            "Crashed within {}s startup window", cfg_clone.starttime
-                        );
+                        warn!(program = %name_clone, code = %status.code().unwrap_or(-1), "Exited before grace period ({:?}s)", grace);
                         // Remove from state
                         let mut map = state_clone.write().await;
                         if let Some(job) = map.get_mut(&name_clone) {
@@ -213,7 +297,36 @@ pub async fn spawn_children(name: &str, cfg: &ProgramConfig, state: SupervisorSt
                 sleep(check_interval).await;
                 elapsed += check_interval;
             }
+            // println!("{:?}", grace);
+            // println!("{}", elapsed);
 
+            // Poll for early exit during the grace period
+            // loop {
+            //     if elapsed >= grace {
+            //         break;  // survived startup
+            //     }
+            //     {
+            //         let mut child_guard = handle_clone.lock().await;
+            //         if let Ok(Some(status)) = child_guard.try_wait() {
+            //             // Exited too early!
+            //             warn!(program = %name_clone, code = %status.code().unwrap_or(-1), "Exited before grace period ({:?}s)", grace_sec);
+            //             // Remove from state
+            //             let mut map = state_clone.write().await;
+            //             if let Some(job) = map.get_mut(&name_clone) {
+            //                 job.children.retain(|h| !Arc::ptr_eq(h, &handle_clone));
+            //             }
+            //             // If policy == Unexpected, respawn immediately
+            //             if let RestartPolicy::Unexpected = cfg_clone.autorestart {
+            //                 schedule_respawn(name_clone.clone(), cfg_clone.clone(), state_clone.clone());
+            //             }
+            //             return;
+            //         }
+            //     }
+            //     sleep(check_interval).await;
+            //     elapsed += check_interval;
+            // }
+
+            info!(program=%name_clone, starttime=cfg_clone.starttime, "Marked healthy after grance period");
             // 2) After grace period, hand off to the normal monitor
             monitor_child(name_clone, cfg_clone, handle_clone, state_clone).await;
         });
@@ -298,13 +411,13 @@ pub async fn apply_config(new_cfg: &Config, state: SupervisorState) {
                 let mut children = Vec::new();
                 if prog_cfg.autostart {
                     let new_children = spawn_children(name, prog_cfg, state.clone()).await;
-                    for handle in &new_children {
-                        info!(
-                            program = %name,
-                            pid = handle.lock().await.id().unwrap_or(0),
-                            "Autostarted replica"
-                        );
-                    }
+                    // for handle in &new_children {
+                    //     info!(
+                    //         program = %name,
+                    //         pid = handle.lock().await.id().unwrap_or(0),
+                    //         "Autostarted replica"
+                    //     );
+                    // }
                     children = new_children;
                 } else {
                     info!(
