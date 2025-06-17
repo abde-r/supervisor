@@ -1,102 +1,82 @@
 programs:
-  # # >>> Simple program with mutiple instances
+  # Simple program with mutiple instances
   # instance_numproc:
-  #   cmd: "echo"
-  #   args: ["Hello world"]
-  #   numprocs: 3
+  #   cmd: "sh"
+  #   args:
+  #     - "-c"
+  #     - |
+  #       echo "Hello world"; \
+  #       sleep 30
+  #   numprocs: 2
   
-  # # >>> The instance is not starting when false until start it in the program.
+  # The instance is not starting when false until start it in the program.
   # instance_autostart:
-  #   cmd: "/usr/sbin/nginx"
-  #   args: []
+  #   cmd: "sh"
+  #   args:
+  #     - "-c"
+  #     - |
+  #       echo "Hello world"; \
+  #       sleep 30
   #   numprocs: 1
   #   autostart: false
-  #   stdout: /tmp/nginx.stdout
-  #   stderr: /tmp/nginx.stderr  
 
-  # # >>> After exit, the instance is not re-starting when never, re-starting when always or if exits a code not listed in exitcodes.
+  # After exit, the instance is not re-starting when never, re-starting when always or if exits a code not listed in exitcodes.
   # instance_autorestart_always:
-  #   cmd: "./scripts/exit.sh"
-  #   args: []
+  #   cmd: "sh"
+  #   args: ["-c", "exit 1"]
   #   numprocs: 1
-  #   # autostart: false
+  #   startretries: 3
   #   autorestart: "always"
   # instance_autorestart_never:
-  #   cmd: "./scripts/exit.sh"
-  #   args: []
+  #   cmd: "sh"
+  #   args: ["-c", "exit 1"]
   #   numprocs: 1
   #   autorestart: "never"
-  # instance_autorestart_unexpected_false:
-  #   cmd: "./scripts/exit.sh"
-  #   args: []
-  #   numprocs: 1
-  #   # autostart: false
-  #   autorestart: "unexpected"
+  #   startretries: 3
   # instance_autorestart_unexpected_true:
-  #   cmd: "./scripts/exit.sh"
-  #   args: []
+  #   cmd: "sh"
+  #   args: ["-c", "exit 1"]
+  #   numprocs: 1
+  #   startretries: 3
+  #   autorestart: "unexpected"
+  # instance_autorestart_unexpected_false:
+  #   cmd: "sh"
+  #   args: ["-c", "exit 1"]
   #   numprocs: 1
   #   autorestart: "unexpected"
+  #   startretries: 3
   #   exitcodes: [1]
 
-  # # >>> After exit, the instance re-starts only if exits a code not listed in exitcodes and autorestart is 'unexpected'.
-  # instance_exit_code_true:
-  #   cmd: "./scripts/exit.sh"
-  #   args: []
-  #   numprocs: 1
-  #   autorestart: "unexpected"
-  #   exitcodes: [1,2]
+  # After exit, the instance re-starts only if exits a code not listed in exitcodes and autorestart is 'unexpected'.
   # instance_exit_code_false:
-  #   cmd: "./scripts/exit.sh"
-  #   args: []
+  #   cmd: "sh"
+  #   args: ["-c", "exit 1"]
   #   numprocs: 1
   #   autorestart: "unexpected"
+  #   startretries: 3
+  #   exitcodes: [1,2]
+  # instance_exit_code_true:
+  #   cmd: "sh"
+  #   args: ["-c", "exit 1"]
+  #   numprocs: 1
+  #   autorestart: "unexpected"
+  #   startretries: 3
   #   exitcodes: [0,2]
   
-  # # >>> The instance promoted to healthy rather than being treated as a startup failure.
+  # The instance promoted to healthy rather than being treated as a startup failure if the starttime value is less than it's starting time.
   # instance_starttime_healthy:
   #   cmd: "sleep"
   #   args: ["10"]
   #   numprocs: 1
   #   starttime: 3
-  
-  # # >>> The instance not marked healthy after exiting before grace time period.
   # instance_starttime_failure:
   #   cmd: "sleep"
   #   args: ["2"]
   #   numprocs: 1
   #   starttime: 5
 
-  # # >>> Waits 5s for clean exit then SIGKILL because the exit returned an exit code of 0.
-  # isntance_graceful_shutdown:
-  #   cmd: "sh"
-  #   args:
-  #     - "-c"
-  #     - |
-  #       echo "PID $$ starting"; \
-  #       trap 'echo "Caught TERM, exiting"; exit 0' TERM; \
-  #       while true; do sleep 1; done
-  #   numprocs: 1
-  #   stopsignal: TERM
-  #   exitcodes: [0,143]
-  #   stoptime: 5
-
-  # # >>> Waits 5s then force-kill because the wait returned an exit code of -1.
-  # isntance_force_kill:
-  #   cmd: "sh"
-  #   args:
-  #     - "-c"
-  #     - |
-  #       echo "Ignoring TERM, PID $$"
-  #       trap '' TERM         # ignore SIGTERM
-  #       while true; do sleep 1; done
-  #   numprocs: 1
-  #   stopsignal: TERM
-  #   exitcodes: [0, 143]
-  #   stoptime: 5
-
-  # # >>> Restarts the instance n times (startretries times)
-  # instance_restartretries:
+  # The instance restarts after failing n times (startretries times)
+  # instance_startretries:
   #   cmd: "sh"
   #   args:
   #     - "-c"
@@ -108,60 +88,55 @@ programs:
   #   exitcodes: [0]
   #   startretries: 3
 
-  # # ─────────────────────────────────────────────────────────────────
-  # # 1) SIGTERM (15 → exit code 128+15 = 143)
-  # # ─────────────────────────────────────────────────────────────────
-  # instance_term:
+  # The instance listens for SIGINT signal, which receives when stopping it, resulting a clean exit immediately.
+  # instance_graceful_shutdown:
   #   cmd: "sh"
-  #   args: ["-c", "while true; do sleep 1; done"]
-  #   numprocs: 1
-  #   stopsignal: TERM
-  #   exitcodes: [0, 143]
-  #   stoptime: 5
-
-  # # ─────────────────────────────────────────────────────────────────
-  # # 2) SIGINT  (2 → exit code 128+2 = 130)
-  # # ─────────────────────────────────────────────────────────────────
-  # instance_int: 
-  #   cmd: "sh"
-  #   args: ["-c", "while true; do sleep 1; done"]
+  #   args:
+  #     - "-c"
+  #     - |
+  #       echo "PID $$ starting"; \
+  #       trap 'exit 0' INT; \
+  #       while true; do sleep 1; done
   #   numprocs: 1
   #   stopsignal: INT
-  #   exitcodes: [0, 130]
   #   stoptime: 5
 
-  # # ─────────────────────────────────────────────────────────────────
-  # # 3) SIGQUIT (3 → exit code 128+3 = 131)
-  # # ─────────────────────────────────────────────────────────────────
-  # instance_quit:
+  # The instance listens for SIGTERM signal, which doesn't receive when stopping it, resulting a forc-kill after 5s.
+  # instance_force_kill:
   #   cmd: "sh"
-  #   args: ["-c", "while true; do sleep 1; done"]
+  #   args:
+  #     - "-c"
+  #     - |
+  #       echo "Ignoring TERM, PID $$"
+  #       trap '' TERM
+  #       while true; do sleep 1; done
   #   numprocs: 1
-  #   stopsignal: QUIT
-  #   exitcodes: [0, 131]
+  #   stopsignal: TERM
   #   stoptime: 5
 
-  # # ─────────────────────────────────────────────────────────────────
-  # # 4) SIGUSR1 (10 → exit code 128+10 = 138)
-  # # ─────────────────────────────────────────────────────────────────
-  # instance_usr1:
-  #   cmd: "sh"
-  #   args: ["-c", "while true; do sleep 1; done"]
-  #   numprocs: 1
-  #   stopsignal: USR1
-  #   exitcodes: [0, 138]
-  #   stoptime: 5
-
-
-  # # >>> Both stdout and stderr logs are redirected to the path specified
+  # The instance redirects both stdout and stderr logs to the path specified if so.
   # instance_stdeout_stderr:
   #   cmd: "sh"
-  #   args: ["-c", "echo 'This stdout is logged from instance_stdeout_stderr'; echo 'This stderr is logged from instance_stdeout_stderr' 1>&2"]
+  #   args:
+  #     - "-c"
+  #     - |
+  #       echo 'This stdout is logged from instance_stdout_stderr'
+  #       echo 'This stderr is logged from instance_stdout_stderr' 1>&2
   #   numprocs: 1
   #   stdout: "logs/instance.out"
   #   stderr: "logs/instance.err"
+  # instance_stdeout_stderr_null:
+  #   cmd: "sh"
+  #   args:
+  #     - "-c"
+  #     - |
+  #       echo 'Useless logs'
+  #       echo 'Useless logs' 1>&2
+  #   numprocs: 1
+  #   stdout: null
+  #   stderr: null
 
-  # # >>> The value of env variables should be expanded in the instance process
+  # The instance expands the value of env variables.
   # instance_env_var:
   #   cmd: "sh"
   #   args: ["-c", "echo It is $HRS:$MIN o clock"]
@@ -169,18 +144,19 @@ programs:
   #   env:
   #     HRS: "13"
   #     MIN: "37"
+  #   stdout: "logs/instance.out"  
 
-  # # >>> The current working dir of the instance should be overridden to the value of 'workingdir' attr
+  # The instance overrides the current working to the value of 'workingdir' attr.
   # instance_local_dir:
   #   cmd: "sh"
   #   args: ["-c", "echo 'created from instance_local_dir' > output.txt"]
   #   numprocs: 1
   #   workingdir: "scripts/a_dir"
 
-  # # >>> Specification of the file mode creation mask to apply before launching the instance.
+  # The instance creates a file applying the file mode creation mask specifications.
   # isntance_umask:
   #   cmd: "sh"
   #   args: ["-c", "touch afile; echo 'created from isntance_umask' > afile"]
   #   numprocs: 1
   #   workingdir: "scripts/a_dir"
-  #   umask: "022"
+  #   umask: "007"

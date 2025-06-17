@@ -60,9 +60,9 @@ fn schedule_respawn(name: String, cfg: ProgramConfig, state: SupervisorState) {
 /*
     @@@
     @monitor_child();
-    . Locks and waits on one child process, checks its exit code against the configured policy.
-    . The 'wait().await' is the only place where anything actually "sleeps". It suspends that spawned task until the OS process exits.
-    . kicks off a local respawn that updates the shared supervisor state --if needed.
+    . Waits for starttime seconds --grace period after the process starts. During the grace period, checking every 100ms if the child process has exited unexpectedly.
+    . Handles Early Exit and Post-Grace --after the grace period by removing the child from the job list and restarting it if the autorestart policy is Unexpected.
+    . Manage restart Logic by scheduling a restart if restart is needed and retries are left, or stops if retries are exhausted.
 */
 async fn monitor_child(
     name: String,
@@ -70,14 +70,12 @@ async fn monitor_child(
     handle: ChildHandle,
     state: SupervisorState,
 ) {
-    // 1) Handle the “grace period” at startup
     let grace_secs = cfg.starttime as u64;
     let grace_duration = Duration::from_secs(grace_secs);
     let mut elapsed = Duration::ZERO;
     let check_interval = Duration::from_millis(100);
 
     while elapsed < grace_duration {
-        // 1a) Lock only to check if child already exited early
         let early_exit = {
             let mut child_guard = handle.lock().await;
             match child_guard.try_wait() {
@@ -96,26 +94,21 @@ async fn monitor_child(
         };
 
         if early_exit {
-            // Remove it from state:
             let mut map = state.write().await;
             if let Some(job) = map.get_mut(&name) {
                 job.children.retain(|h| !Arc::ptr_eq(h, &handle));
             }
-            // If policy == Unexpected, respawn immediately:
             if let RestartPolicy::Unexpected = cfg.autorestart {
                 schedule_respawn(name.clone(), cfg.clone(), state.clone());
             }
             return;
         }
 
-        // 1b) Drop lock, then sleep
         sleep(check_interval).await;
         elapsed += check_interval;
     }
 
-    // 2) If we reach here, child survived the “grace” → now do the normal “wait until exit” pattern:
     loop {
-        // 2a) Check if child exited:
         let maybe_status = {
             let mut child_guard = handle.lock().await;
             child_guard.try_wait().unwrap_or(None)
@@ -127,7 +120,6 @@ async fn monitor_child(
                 OneOrMany::Many(vs) => vs.clone(),
             };
 
-            // Remove from state:
             {
                 let mut map = state.write().await;
                 if let Some(job) = map.get_mut(&name) {
@@ -135,7 +127,6 @@ async fn monitor_child(
                 }
             }
 
-            // Decide restart:
             let should_restart = match cfg.autorestart {
                 RestartPolicy::Always => true,
                 RestartPolicy::Never => false,
@@ -169,7 +160,6 @@ async fn monitor_child(
             return;
         }
 
-        // 2b) Drop lock, then sleep
         sleep(check_interval).await;
     }
 }
@@ -202,23 +192,6 @@ pub async fn spawn_children(name: &str, cfg: &ProgramConfig, state: SupervisorSt
             }
         }
 
-        // if let Some(path) = &cfg.stdout {
-        //     if path == "null" {
-        //         cmd.stdout(Stdio::null());
-        //     } else {
-        //         let f = File::create(path).unwrap_or_else(|e| panic!("failed to open stdout file `{}`: {}", path, e));
-        //         cmd.stdout(Stdio::from(f));
-        //     }
-        // }
-    
-        // if let Some(path) = &cfg.stderr {
-        //     if path == "null" {
-        //         cmd.stderr(Stdio::null());
-        //     } else {
-        //         let f = File::create(path).unwrap_or_else(|e| panic!("failed to open stderr file `{}`: {}", path, e));
-        //         cmd.stderr(Stdio::from(f));
-        //     }
-        // }
         let stdout_cfg = cfg.stdout.as_deref();
         let stdout_stdio = match stdout_cfg {
             Some("null")       => Stdio::null(),
@@ -267,9 +240,7 @@ pub async fn spawn_children(name: &str, cfg: &ProgramConfig, state: SupervisorSt
         let cfg_clone = cfg.clone();
         let state_clone = state.clone();
         let handle_clone = handle.clone();
-        // spawn(async move {
-        //     monitor_child(name_clone, cfg_clone, handle_clone, state_clone).await;
-        // });
+
         tokio::spawn(async move {
             let grace_sec = cfg_clone.starttime as u64;
             let grace = Duration::from_secs(grace_sec);
@@ -280,14 +251,11 @@ pub async fn spawn_children(name: &str, cfg: &ProgramConfig, state: SupervisorSt
                 {
                     let mut child_guard = handle_clone.lock().await;
                     if let Ok(Some(status)) = child_guard.try_wait() {
-                        // Exited too early!
-                        warn!(program = %name_clone, code = %status.code().unwrap_or(-1), "Exited before grace period ({:?}s)", grace);
-                        // Remove from state
+                        warn!(program = %name_clone, code = %status.code().unwrap_or(-1), "Exited before grace period ({:?})", grace);
                         let mut map = state_clone.write().await;
                         if let Some(job) = map.get_mut(&name_clone) {
                             job.children.retain(|h| !Arc::ptr_eq(h, &handle_clone));
                         }
-                        // If policy == Unexpected, respawn immediately
                         if let RestartPolicy::Unexpected = cfg_clone.autorestart {
                             schedule_respawn(name_clone.clone(), cfg_clone.clone(), state_clone.clone());
                         }
@@ -297,37 +265,8 @@ pub async fn spawn_children(name: &str, cfg: &ProgramConfig, state: SupervisorSt
                 sleep(check_interval).await;
                 elapsed += check_interval;
             }
-            // println!("{:?}", grace);
-            // println!("{}", elapsed);
-
-            // Poll for early exit during the grace period
-            // loop {
-            //     if elapsed >= grace {
-            //         break;  // survived startup
-            //     }
-            //     {
-            //         let mut child_guard = handle_clone.lock().await;
-            //         if let Ok(Some(status)) = child_guard.try_wait() {
-            //             // Exited too early!
-            //             warn!(program = %name_clone, code = %status.code().unwrap_or(-1), "Exited before grace period ({:?}s)", grace_sec);
-            //             // Remove from state
-            //             let mut map = state_clone.write().await;
-            //             if let Some(job) = map.get_mut(&name_clone) {
-            //                 job.children.retain(|h| !Arc::ptr_eq(h, &handle_clone));
-            //             }
-            //             // If policy == Unexpected, respawn immediately
-            //             if let RestartPolicy::Unexpected = cfg_clone.autorestart {
-            //                 schedule_respawn(name_clone.clone(), cfg_clone.clone(), state_clone.clone());
-            //             }
-            //             return;
-            //         }
-            //     }
-            //     sleep(check_interval).await;
-            //     elapsed += check_interval;
-            // }
 
             info!(program=%name_clone, starttime=cfg_clone.starttime, "Marked healthy after grance period");
-            // 2) After grace period, hand off to the normal monitor
             monitor_child(name_clone, cfg_clone, handle_clone, state_clone).await;
         });
         children.push(handle);
@@ -411,13 +350,6 @@ pub async fn apply_config(new_cfg: &Config, state: SupervisorState) {
                 let mut children = Vec::new();
                 if prog_cfg.autostart {
                     let new_children = spawn_children(name, prog_cfg, state.clone()).await;
-                    // for handle in &new_children {
-                    //     info!(
-                    //         program = %name,
-                    //         pid = handle.lock().await.id().unwrap_or(0),
-                    //         "Autostarted replica"
-                    //     );
-                    // }
                     children = new_children;
                 } else {
                     info!(

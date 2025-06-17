@@ -1,12 +1,12 @@
 use crate::runtime::{RuntimeJob, SupervisorState, ChildHandle, spawn_children};
 use crate::parse::ProgramConfig;
 use std::collections::HashMap;
-use nix::sys::signal::{kill, Signal};
+use nix::sys::signal::{Signal};
 use nix::unistd::Pid;
 use std::time::Duration;
 use tokio::time::sleep;
 use std::sync::Arc;
-use tracing::{info, warn, error};
+use tracing::{warn, error};
 use std::os::unix::process::ExitStatusExt;
 use nix::sys::signal::killpg;
 
@@ -55,12 +55,10 @@ pub async fn stop_and_cleanup(
     handle: &ChildHandle,
     job: &mut RuntimeJob,
 ) {
-    // 1) Acquire lock just to read PID, then drop immediately:
     let pid_opt = {
         let child = handle.lock().await;
         child.id().map(|u| u as i32)
     };
-    println!("i'm here"); // No longer blocks
 
     if let Some(pid) = pid_opt {
         let sig = match cfg.stopsignal.to_uppercase().as_str() {
@@ -71,14 +69,12 @@ pub async fn stop_and_cleanup(
             _                  => Signal::SIGTERM,
         };
         warn!(program=%name, pid, signal=?sig, "sending stop signal");
-        // Send SIG to the whole process group, not just one PID:
         let pgid = Pid::from_raw(-pid);
         if let Err(e) = killpg(pgid, sig) {
             error!(program=%name, error=?e, "failed to send {}", sig);
         }
     }
 
-    // 2) Now wait up to stoptime for the child to exit, but lock only briefly:
     let timeout = Duration::from_secs(cfg.stoptime as u64);
     let mut elapsed = Duration::ZERO;
     let check_interval = Duration::from_millis(100);
@@ -87,10 +83,9 @@ pub async fn stop_and_cleanup(
         let has_exited = {
             let mut guard = handle.lock().await;
             guard.try_wait().unwrap_or(Some(std::process::ExitStatus::from_raw(-1))).is_some()
-        }; // guard dropped here
+        };
 
         if has_exited {
-            // child is gone; remove from job.children and return
             job.children.retain(|h| !Arc::ptr_eq(h, handle));
             return;
         }
@@ -99,7 +94,6 @@ pub async fn stop_and_cleanup(
         elapsed += check_interval;
     }
 
-    // 3) If it still hasn’t exited, force‐kill the pgid:
     if let Some(pid) = pid_opt {
         let pgid = Pid::from_raw(-pid);
         let _ = killpg(pgid, Signal::SIGKILL);

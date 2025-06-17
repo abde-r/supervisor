@@ -89,7 +89,11 @@ where
                         let name = cmd["stop ".len()..].trim();
                         on_stop(name).await;
                     }
-                    "exit" => break,
+                    "exit" => {
+                        tracing::info!("Supervisor exited!");
+                        break
+                    },
+                    "help" => println!("start -instance_name --start a program\nstop -instance_name --stop a program\nreload --reload all programs\nstatus --status of all programs\nexit --exit supervisor"),
                     other => println!("Unknown command: {}", other),
                 }
             }
