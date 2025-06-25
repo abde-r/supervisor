@@ -1,18 +1,22 @@
 use crate::parse::{Config, ProgramConfig, OneOrMany, RestartPolicy};
-use tokio::process::{Child, Command};
-use tokio::sync::{RwLock, Mutex};
-use tokio::spawn;
+use tokio::sync::{RwLock};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::process::Stdio;
-use std::fs::File;
 use tracing::{info, warn};
-use nix::libc::{umask, mode_t};
+use std::fs::File;
 use tokio::time::{sleep, Duration};
-use tracing::error;
+use nix::libc;
+use std::os::unix::io::AsRawFd;
+use libc::{STDIN_FILENO, STDOUT_FILENO, STDERR_FILENO};
+use std::fs::OpenOptions;
+use nix::unistd::{fork, ForkResult, execvp, setsid, dup2, Pid};
+use nix::sys::stat::{umask, Mode};
+use std::ffi::CString;
+use std::path::Path;
+use nix::sys::wait::WaitStatus;
+use nix::sys::wait::WaitPidFlag;
+use nix::sys::wait::waitpid;
 
-
-pub type ChildHandle = Arc<Mutex<Child>>;
 
 // Shared map of Runtime data
 // Updated each time the config data changes
@@ -21,257 +25,8 @@ pub type SupervisorState = Arc<RwLock<HashMap<String, RuntimeJob>>>;
 // Struct for the Parsed Config content with spawned children process
 pub struct RuntimeJob {
     pub config: ProgramConfig,
-    pub children: Vec<ChildHandle>,
+    pub children: Vec<Pid>,
     pub retries_left: usize,
-}
-
-
-
-
-
-/*
-    @@@
-    @schedule_spawn();
-    . Fires off a background task to respawn a child and merge the new handles into the shared state.
-*/
-fn schedule_spawn(name: String, cfg: ProgramConfig, state: SupervisorState) {
-    spawn(async move {
-        let mut replacements = spawn_children(&name, &cfg, state.clone()).await;
-        let mut map = state.write().await;
-        if let Some(job) = map.get_mut(&name) {
-            job.children.extend(replacements.drain(..));
-        }
-    });
-}
-
-
-/// Helper to respawn from anywhere
-fn schedule_respawn(name: String, cfg: ProgramConfig, state: SupervisorState) {
-    tokio::spawn(async move {
-        let mut replacements = spawn_children(&name, &cfg, state.clone()).await;
-        let mut map = state.write().await;
-        if let Some(job) = map.get_mut(&name) {
-            job.children.append(&mut replacements);
-        }
-    });
-}
-
-
-/*
-    @@@
-    @monitor_child();
-    . Waits for starttime seconds --grace period after the process starts. During the grace period, checking every 100ms if the child process has exited unexpectedly.
-    . Handles Early Exit and Post-Grace --after the grace period by removing the child from the job list and restarting it if the autorestart policy is Unexpected.
-    . Manage restart Logic by scheduling a restart if restart is needed and retries are left, or stops if retries are exhausted.
-*/
-async fn monitor_child(
-    name: String,
-    cfg: ProgramConfig,
-    handle: ChildHandle,
-    state: SupervisorState,
-) {
-    let grace_secs = cfg.starttime as u64;
-    let grace_duration = Duration::from_secs(grace_secs);
-    let mut elapsed = Duration::ZERO;
-    let check_interval = Duration::from_millis(100);
-
-    while elapsed < grace_duration {
-        let early_exit = {
-            let mut child_guard = handle.lock().await;
-            match child_guard.try_wait() {
-                Ok(Some(status)) => {
-                    let code = status.code().unwrap_or(-1) as u32;
-                    error!(
-                        program = %name,
-                        code,
-                        "Exited within {}s startup window",
-                        grace_secs
-                    );
-                    true
-                }
-                _ => false,
-            }
-        };
-
-        if early_exit {
-            let mut map = state.write().await;
-            if let Some(job) = map.get_mut(&name) {
-                job.children.retain(|h| !Arc::ptr_eq(h, &handle));
-            }
-            if let RestartPolicy::Unexpected = cfg.autorestart {
-                schedule_respawn(name.clone(), cfg.clone(), state.clone());
-            }
-            return;
-        }
-
-        sleep(check_interval).await;
-        elapsed += check_interval;
-    }
-
-    loop {
-        let maybe_status = {
-            let mut child_guard = handle.lock().await;
-            child_guard.try_wait().unwrap_or(None)
-        };
-        if let Some(status) = maybe_status {
-            let code = status.code().unwrap_or(-1) as u32;
-            let expected = match &cfg.exitcodes {
-                OneOrMany::One(n) => vec![*n],
-                OneOrMany::Many(vs) => vs.clone(),
-            };
-
-            {
-                let mut map = state.write().await;
-                if let Some(job) = map.get_mut(&name) {
-                    job.children.retain(|h| !Arc::ptr_eq(h, &handle));
-                }
-            }
-
-            let should_restart = match cfg.autorestart {
-                RestartPolicy::Always => true,
-                RestartPolicy::Never => false,
-                RestartPolicy::Unexpected => !expected.contains(&code),
-            };
-
-            if should_restart {
-                let mut map = state.write().await;
-                if let Some(job) = map.get_mut(&name) {
-                    if job.retries_left == 0 {
-                        error!(program=%name, "Retry limit reached; not restarting");
-                    } else {
-                        job.retries_left -= 1;
-                        warn!(
-                            program = %name,
-                            remaining = job.retries_left,
-                            "restarting per policy; {} retries left",
-                            job.retries_left
-                        );
-                        drop(map);
-                        schedule_spawn(name.clone(), cfg.clone(), state.clone());
-                    }
-                }
-            } else {
-                info!(
-                    program = %name,
-                    exit_code = code,
-                    "Process exited; not restarting per policy"
-                );
-            }
-            return;
-        }
-
-        sleep(check_interval).await;
-    }
-}
-
-
-
-
-
-
-/*
-    @@@
-    @spawn_children();
-    . Builds a command —-applying cwd, env, I/O redirection, and umask-— and wraps each child in an array of mutexes.
-    . Detaches a tokio::spawn monitor task per process to await exit, update state, and restart if needed.
-    . Returns all child handles without blocking.
-*/
-pub async fn spawn_children(name: &str, cfg: &ProgramConfig, state: SupervisorState) -> Vec<ChildHandle> {
-    let mut children = Vec::with_capacity(cfg.numprocs);
-    for i in 0..cfg.numprocs {
-        let mut cmd = Command::new(&cfg.cmd);
-        cmd.args(&cfg.args);
-
-        if let Some(dir) = &cfg.workingdir {
-            cmd.current_dir(dir);
-        }
-
-        if let Some(envs) = &cfg.env {
-            for (k, v) in envs {
-                cmd.env(k, v);
-            }
-        }
-
-        let stdout_cfg = cfg.stdout.as_deref();
-        let stdout_stdio = match stdout_cfg {
-            Some("null")       => Stdio::null(),
-            Some(path)         => {
-                let f = File::create(path)
-                    .unwrap_or_else(|e| panic!("failed to open stdout file `{}`: {}", path, e));
-                Stdio::from(f)
-            }
-            None               => Stdio::null(),
-        };
-        cmd.stdout(stdout_stdio);
-
-        let stderr_cfg = cfg.stderr.as_deref();
-        let stderr_stdio = match stderr_cfg {
-            Some("null")       => Stdio::null(),
-            Some(path)         => {
-                let f = File::create(path)
-                    .unwrap_or_else(|e| panic!("failed to open stderr file `{}`: {}", path, e));
-                Stdio::from(f)
-            }
-            None               => Stdio::null(),
-        };
-        cmd.stderr(stderr_stdio);
-
-        if let Some(umask_str) = &cfg.umask {
-            let mask = u32::from_str_radix(umask_str, 8).expect("invalid umask in config") as mode_t;
-            unsafe {
-                cmd.pre_exec(move || {
-                    umask(mask);
-                    Ok(())
-                });
-            }
-        }
-
-        let child = cmd.spawn().unwrap_or_else(|e| panic!("failed to spawn child `{}`: {}", cfg.cmd, e));
-        info!(
-            program = %cfg.cmd,
-            index = i,
-            program = name,
-            pid = child.id().unwrap_or(0),
-            "Process started"
-        );
-
-        let handle: ChildHandle = Arc::new(Mutex::new(child));
-        let name_clone = name.to_string();
-        let cfg_clone = cfg.clone();
-        let state_clone = state.clone();
-        let handle_clone = handle.clone();
-
-        tokio::spawn(async move {
-            let grace_sec = cfg_clone.starttime as u64;
-            let grace = Duration::from_secs(grace_sec);
-            let mut elapsed = Duration::ZERO;
-            let check_interval = Duration::from_millis(100);
-
-            while elapsed < grace {
-                {
-                    let mut child_guard = handle_clone.lock().await;
-                    if let Ok(Some(status)) = child_guard.try_wait() {
-                        warn!(program = %name_clone, code = %status.code().unwrap_or(-1), "Exited before grace period ({:?})", grace);
-                        let mut map = state_clone.write().await;
-                        if let Some(job) = map.get_mut(&name_clone) {
-                            job.children.retain(|h| !Arc::ptr_eq(h, &handle_clone));
-                        }
-                        if let RestartPolicy::Unexpected = cfg_clone.autorestart {
-                            schedule_respawn(name_clone.clone(), cfg_clone.clone(), state_clone.clone());
-                        }
-                        return;
-                    }
-                }
-                sleep(check_interval).await;
-                elapsed += check_interval;
-            }
-
-            info!(program=%name_clone, starttime=cfg_clone.starttime, "Marked healthy after grance period");
-            monitor_child(name_clone, cfg_clone, handle_clone, state_clone).await;
-        });
-        children.push(handle);
-    }
-    children
 }
 
 
@@ -282,85 +37,332 @@ pub async fn spawn_children(name: &str, cfg: &ProgramConfig, state: SupervisorSt
 /*
     @@@
     @apply_config();
-    . Stops and removes jobs no longer in the Config.
-    . Updates running jobs by scaling them up or down to match the new numprocs.
-    . Adds new jobs --autostarting them if configured.
+    . Updates existing state
+    . Stops old processes, starts new ones, and waits the grace period before marking as healthy.
+    . Spawns extra processes if numprocs increased and marks them healthy after the grace period.
+    . Starts new programs if autostart is true and marks them healthy --after grace, if set.
+    . Logs health status based on whether processes survived the grace period.
 */
-pub async fn apply_config(new_cfg: &Config, state: SupervisorState) {
-    info!(
-        "Applying new configuration with {} programs",
-        new_cfg.programs.len()
-    );
+pub async fn apply_config(
+    cfg: &Config,
+    state: SupervisorState,
+) {
     let mut map = state.write().await;
 
-    let to_remove: Vec<String> = map.keys()
-        .filter(|name| !new_cfg.programs.contains_key(*name))
-        .cloned()
-        .collect();
-    for name in to_remove {
-        if let Some(job) = map.remove(&name) {
-            for handle in job.children {
-                let mut child = handle.lock().await;
-                let _ = child.kill().await;
-                info!(
-                    program = %name,
-                    pid = child.id().unwrap_or(0),
-                    "Process stopped (job removed)"
-                );
+    for (name, prog_cfg) in &cfg.programs {
+        match map.get_mut(name) {
+            Some(job) => {
+                // … config‐changed branch …
+                if job.config != *prog_cfg {
+                    // stop old children…
+                    let new_pids = spawn_processes(name, prog_cfg);
+
+                    if prog_cfg.starttime > 0 {
+                        let prog = name.clone();
+                        let pids = new_pids.clone();
+                        let grace = prog_cfg.starttime;
+                        tokio::spawn(async move {
+                            sleep(Duration::from_secs(grace)).await;
+
+                            let still_alive = pids.iter().any(|pid| {
+                                matches!(
+                                    waitpid(*pid, Some(WaitPidFlag::WNOHANG)),
+                                    Ok(WaitStatus::StillAlive)
+                                )
+                            });
+
+                            if still_alive {
+                                tracing::info!(
+                                    program = %prog,
+                                    starttime = grace,
+                                    "Marked healthy after grace period"
+                                );
+                            } else {
+                                tracing::warn!(
+                                    program = %prog,
+                                    starttime = grace,
+                                    "Exited before grace period"
+                                );
+                            }
+                        });
+                    } else {
+                        tracing::info!(program = name, starttime = 0, "Marked healthy immediately");
+                    }
+
+                    job.children = new_pids;
+                    job.config = prog_cfg.clone();
+                    job.retries_left = prog_cfg.startretries;
+                }
+
+                // … scale‐up branch …
+                else if prog_cfg.numprocs > job.children.len() {
+                    let mut extra = spawn_processes(name, prog_cfg);
+
+                    if prog_cfg.starttime > 0 {
+                        let prog = name.clone();
+                        let pids = extra.clone();
+                        let grace = prog_cfg.starttime;
+                        tokio::spawn(async move {
+                            sleep(Duration::from_secs(grace)).await;
+                            let still_alive = pids.iter().any(|pid| {
+                                matches!(
+                                    waitpid(*pid, Some(WaitPidFlag::WNOHANG)),
+                                    Ok(WaitStatus::StillAlive)
+                                )
+                            });
+                            if still_alive {
+                                tracing::info!(
+                                    program = %prog,
+                                    starttime = grace,
+                                    "Marked healthy after grace period"
+                                );
+                            } else {
+                                tracing::warn!(
+                                    program = %prog,
+                                    starttime = grace,
+                                    "Exited before grace period"
+                                );
+                            }
+                        });
+                    } else {
+                        tracing::info!(program = name, starttime = 0, "Marked healthy immediately");
+                    }
+
+                    job.children.append(&mut extra);
+                }
+            }
+
+            None => {
+                // … autostart branch …
+                if prog_cfg.autostart {
+                    let pids = spawn_processes(name, prog_cfg);
+
+                    if prog_cfg.starttime > 0 {
+                        let prog = name.clone();
+                        let pids = pids.clone();
+                        let grace = prog_cfg.starttime;
+                        tokio::spawn(async move {
+                            sleep(Duration::from_secs(grace)).await;
+                            let still_alive = pids.iter().any(|pid| {
+                                matches!(
+                                    waitpid(*pid, Some(WaitPidFlag::WNOHANG)),
+                                    Ok(WaitStatus::StillAlive)
+                                )
+                            });
+                            if still_alive {
+                                tracing::info!(
+                                    program = %prog,
+                                    starttime = grace,
+                                    "Marked healthy after grace period"
+                                );
+                            } else {
+                                tracing::warn!(
+                                    program = %prog,
+                                    starttime = grace,
+                                    "Exited before grace period"
+                                );
+                            }
+                        });
+                    } else {
+                        tracing::info!(program = name, starttime = 0, "Marked healthy immediately");
+                    }
+
+                    map.insert(
+                        name.clone(),
+                        RuntimeJob {
+                            config: prog_cfg.clone(),
+                            children: pids,
+                            retries_left: prog_cfg.startretries,
+                        },
+                    );
+                }
+            }
+        }
+    }
+}
+
+
+
+
+
+
+/*
+    @@@
+    @spawn_processes();
+    . Forks as many as 'numprocs' processes and detaches into a new session (setsid()).
+    . Changes working directory, umask, and environment if specified, and redirect stdout/stderr to log files if configured.
+    . Executes the command using execvp().
+*/
+pub fn spawn_processes(name: &str, cfg: &ProgramConfig) -> Vec<Pid> {
+    let mut pids = Vec::with_capacity(cfg.numprocs);
+
+    for _ in 0..cfg.numprocs {
+        match unsafe { fork() } {
+            Ok(ForkResult::Parent { child, .. }) => {
+                info!(program = name, pid = child.as_raw(), "Spawned new instance");
+                pids.push(child);
+            }
+            Ok(ForkResult::Child) => {
+                setsid().expect("setsid failed");
+
+                if let Some(dir) = &cfg.workingdir {
+                    std::env::set_current_dir(Path::new(dir))
+                        .expect("chdir failed");
+                }
+
+                if let Some(mask_str) = &cfg.umask {
+                    let mask_val = u32::from_str_radix(mask_str, 8)
+                        .expect("invalid umask");
+                    let mode = Mode::from_bits_truncate(mask_val.try_into().unwrap());
+                    umask(mode);
+                }
+
+                if let Some(envs) = &cfg.env {
+                    for (k, v) in envs {
+                        std::env::set_var(k, v);
+                    }
+                }
+
+                if let Some(parent) = Path::new(&cfg.stdout.clone().unwrap_or_default()).parent()
+                {
+                    std::fs::create_dir_all(parent).ok();
+                }
+
+                let devnull = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open("/dev/null")
+                    .expect("failed to open /dev/null");
+                let null_fd = devnull.as_raw_fd();
+                dup2(null_fd, STDIN_FILENO).ok();
+
+                let stdout_file: File = if let Some(ref path) = cfg.stdout {
+                    if let Some(dir) = Path::new(path).parent() {
+                        std::fs::create_dir_all(dir).ok();
+                    }
+                    File::options()
+                        .create(true)
+                        .append(true)
+                        .open(path)
+                        .expect("failed to open stdout file")
+                } else {
+                    devnull.try_clone().unwrap()
+                };
+                dup2(stdout_file.as_raw_fd(), STDOUT_FILENO).ok();
+
+                let stderr_file: File = if let Some(ref path) = cfg.stderr {
+                    if let Some(dir) = Path::new(path).parent() {
+                        std::fs::create_dir_all(dir).ok();
+                    }
+                    File::options()
+                        .create(true)
+                        .append(true)
+                        .open(path)
+                        .expect("failed to open stderr file")
+                } else {
+                    devnull.try_clone().unwrap()
+                };
+                dup2(stderr_file.as_raw_fd(), STDERR_FILENO).ok();
+
+                let cmd_c = CString::new(cfg.cmd.clone()).unwrap();
+                let mut args_c = Vec::with_capacity(cfg.args.len() + 1);
+                args_c.push(cmd_c.clone());
+                for arg in &cfg.args {
+                    args_c.push(CString::new(arg.as_str()).unwrap());
+                }
+
+                let Err(e) = execvp(&cmd_c, &args_c);
+                eprintln!("execvp failed: {}", e);
+                std::process::exit(1);
+            }
+            Err(err) => {
+                panic!("fork failed: {}", err);
             }
         }
     }
 
-    for (name, prog_cfg) in &new_cfg.programs {
-        match map.get_mut(name) {
-            Some(rt_job) => {
-                let current = rt_job.children.len();
-                let desired = prog_cfg.numprocs;
-                if desired > current {
-                    let mut extras = spawn_children(name, &prog_cfg, state.clone()).await;
-                    for handle in &extras {
-                        info!(
-                            program = %name,
-                            pid = handle.lock().await.id().unwrap_or(0),
-                            "Additional replica started"
-                        );
-                    }
-                    rt_job.children.append(&mut extras);
-                } else if desired < current {
-                    let surplus = rt_job.children.split_off(desired);
-                    for handle in surplus {
-                        let mut child = handle.lock().await;
-                        let _ = child.kill().await;
-                        info!(
-                            program = %name,
-                            pid = child.id().unwrap_or(0),
-                            "Surplus replica stopped (scale down)"
-                        );
-                    }
+    pids
+}
+
+
+
+
+
+
+/*
+    @@@
+    @reap_children();
+    . Monitors and handles terminated child processes non-blockingly waiting for any child process to exit.
+    . Logs an event if a child exited or calls handle_child_exit(...) to update internal state and possibly restart it.
+*/
+pub async fn reap_children(state: SupervisorState) {
+    loop {
+        while let Ok(status) = waitpid(Pid::from_raw(-1), Some(WaitPidFlag::WNOHANG)) {
+            match status {
+                WaitStatus::Exited(pid, code) => {
+                    info!(pid = pid.as_raw(), exit_code = code, "Child process exited");
+                    handle_child_exit(pid, code as u32, &state).await;
                 }
-                rt_job.config = prog_cfg.clone(); // Updating stored config
-            }
-            None => {
-                info!(
-                    program = %name,
-                    "Starting new job with {} replicas",
-                    prog_cfg.numprocs
-                );
-        
-                let mut children = Vec::new();
-                if prog_cfg.autostart {
-                    let new_children = spawn_children(name, prog_cfg, state.clone()).await;
-                    children = new_children;
-                } else {
-                    info!(
-                        program = %name,
-                        autorestart = prog_cfg.autostart,
-                        "Inserted job without starting (autostart=false)"
-                    );
+
+                WaitStatus::Signaled(pid, sig, _) => {
+                    warn!(pid = pid.as_raw(), signal = ?sig, "Child process killed by signal");
+                    handle_child_exit(pid, 128 + (sig as i32) as u32, &state).await;
                 }
-                map.insert(name.clone(), RuntimeJob { config: prog_cfg.clone(), children, retries_left: prog_cfg.startretries });
+
+                WaitStatus::StillAlive
+                | WaitStatus::Stopped(_, _)
+                | WaitStatus::Continued(_) => {
+                }
             }
         }
+
+        tokio::time::sleep(Duration::from_millis(500)).await;
     }
-    info!("Configuration application complete");
+}
+
+
+
+
+
+
+
+
+/*
+    @@@
+    @handle_child_exit();
+    . Updates the internal state when a child process exits.
+    . Finds exited jobs and removes the PID from the list of active children.
+    . Checks restart policy (Always, Never, or Unexpected) and restart if needed.
+    . Logs whether the process is restarted or not.
+*/
+async fn handle_child_exit(pid: Pid, code_u32: u32, state: &SupervisorState) {
+    let mut map = state.write().await;
+    for (name, job) in map.iter_mut() {
+        if let Some(idx) = job.children.iter().position(|&p| p == pid) {
+            job.children.remove(idx);
+
+            let should_restart = match job.config.autorestart {
+                RestartPolicy::Always => true,
+                RestartPolicy::Never  => false,
+                RestartPolicy::Unexpected => {
+                    match &job.config.exitcodes {
+                        OneOrMany::One(expected)       => code_u32 != *expected,
+                        OneOrMany::Many(expected_list) => !expected_list.contains(&code_u32),
+                    }
+                }
+            };
+
+            if should_restart && job.retries_left > 0 {
+                job.retries_left -= 1;
+                let new_pids = spawn_processes(name, &job.config);
+                info!(program = name, "Restarting child; {} retries left", job.retries_left);
+                job.children.extend(new_pids);
+            } else {
+                info!(program = name, "Not restarting (policy: {:?}, retries left: {})",
+                      job.config.autorestart, job.retries_left);
+            }
+
+            break;
+        }
+    }
 }

@@ -4,6 +4,9 @@ use rustyline::highlight::Highlighter;
 use rustyline::hint::Hinter;
 use rustyline::validate::Validator;
 use std::future::Future;
+use chrono::Local;
+use std::fs::File;
+use std::io::{BufRead, BufReader};
 
 
 
@@ -93,6 +96,29 @@ where
                         tracing::info!("Supervisor exited!");
                         break
                     },
+                    "tail" => {
+                        let today = Local::now().format("%Y-%m-%d");
+                        let path = format!("logs/supervisor.log.{}", today);
+
+                        let file = match File::open(&path) {
+                            Ok(f) => f,
+                            Err(e) => {
+                                eprintln!("Couldn't open {}: {}", path, e);
+                                break;
+                            }
+                        };
+
+                        let reader = BufReader::new(file);
+                        let lines: Vec<String> = reader
+                            .lines()
+                            .filter_map(Result::ok)
+                            .collect();
+
+                        let start = lines.len().saturating_sub(10);
+                        for line in &lines[start..] {
+                            println!("{}", line);
+                        }
+                    }
                     "help" => println!("start -instance_name --start a program\nstop -instance_name --stop a program\nreload --reload all programs\nstatus --status of all programs\nexit --exit supervisor"),
                     other => println!("Unknown command: {}", other),
                 }

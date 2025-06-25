@@ -1,7 +1,7 @@
 use serde::Deserialize;
 use std::{collections::HashMap, fs};
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, PartialEq)]
 #[serde(untagged)]
 pub enum OneOrMany<T> {
     One(T),
@@ -21,7 +21,8 @@ fn default_autostart() -> bool { true }
 fn default_autorestart() -> RestartPolicy { RestartPolicy::Never }
 
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, PartialEq)]
+#[allow(dead_code)]
 pub struct ProgramConfig {
     pub cmd: String,
     pub args: Vec<String>,

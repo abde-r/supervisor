@@ -19,7 +19,6 @@ pub fn logs_tracing() -> WorkerGuard {
         .with_ansi(false)
         .with_target(true)
         .with_level(true)
-        .with_thread_ids(true)
         .with_writer(non_blocking)
         .with_max_level(tracing::Level::INFO)
         .finish();

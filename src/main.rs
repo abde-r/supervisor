@@ -5,7 +5,7 @@ mod shell;
 mod control;
 
 use parse::{parser};
-use runtime::{apply_config, SupervisorState};
+use runtime::{apply_config, SupervisorState, reap_children};
 use logger::{logs_tracing};
 use shell::run_shell;
 use control::{start_program, stop_program};
@@ -29,7 +29,9 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     
     let _guard = logs_tracing();
     tracing::info!("Supervisor started!");
+    
     apply_config(&cfg, state.clone()).await;
+    tokio::spawn(reap_children(state.clone()));
 
     let status_state = state.clone();
     let reload_state = state.clone();

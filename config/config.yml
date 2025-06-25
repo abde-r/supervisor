@@ -89,6 +89,7 @@ programs:
   #   startretries: 3
 
   # The instance listens for SIGINT signal, which receives when stopping it, resulting a clean exit immediately.
+  # The instance listens for SIGTERM signal, which doesn't receive when stopping it, resulting a forc-kill after 5s.
   # instance_graceful_shutdown:
   #   cmd: "sh"
   #   args:
@@ -100,8 +101,6 @@ programs:
   #   numprocs: 1
   #   stopsignal: INT
   #   stoptime: 5
-
-  # The instance listens for SIGTERM signal, which doesn't receive when stopping it, resulting a forc-kill after 5s.
   # instance_force_kill:
   #   cmd: "sh"
   #   args:
@@ -144,7 +143,7 @@ programs:
   #   env:
   #     HRS: "13"
   #     MIN: "37"
-  #   stdout: "logs/instance.out"  
+  #   stdout: "logs/instance.out"
 
   # The instance overrides the current working to the value of 'workingdir' attr.
   # instance_local_dir:
