@@ -63,7 +63,8 @@ pub fn stop_and_cleanup_pid(pid: Pid, cfg: &ProgramConfig) {
         _                  => Signal::SIGTERM,
     };
 
-    let pgid = Pid::from_raw(-pid.as_raw());
+    let pgid = Pid::from_raw(pid.as_raw());
+    tracing::info!("Sending {:?} to process group {}", sig, pgid);
     let _ = killpg(pgid, sig);
 
     let timeout = Duration::from_secs(cfg.stoptime as u64);
@@ -77,12 +78,21 @@ pub fn stop_and_cleanup_pid(pid: Pid, cfg: &ProgramConfig) {
                 elapsed += interval;
                 continue;
             }
-            Ok(_) | Err(_) => return,
+            Ok(status) => {
+                tracing::info!("Process {} exited with status {:?}", pid, status);
+                return;
+            }
+            Err(e) => {
+                tracing::warn!("waitpid error for {}: {:?}", pid, e);
+                return;
+            }
         }
     }
 
+    tracing::warn!("Timeout expired. Sending SIGKILL to process group {}", pgid);
     let _ = killpg(pgid, Signal::SIGKILL);
 }
+
 
 
 

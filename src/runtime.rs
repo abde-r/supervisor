@@ -297,28 +297,35 @@ pub fn spawn_processes(name: &str, cfg: &ProgramConfig) -> Vec<Pid> {
 */
 pub async fn reap_children(state: SupervisorState) {
     loop {
-        while let Ok(status) = waitpid(Pid::from_raw(-1), Some(WaitPidFlag::WNOHANG)) {
-            match status {
-                WaitStatus::Exited(pid, code) => {
+        loop {
+            match waitpid(Pid::from_raw(-1), Some(WaitPidFlag::WNOHANG)) {
+                Ok(WaitStatus::Exited(pid, code)) => {
                     info!(pid = pid.as_raw(), exit_code = code, "Child process exited");
                     handle_child_exit(pid, code as u32, &state).await;
                 }
-
-                WaitStatus::Signaled(pid, sig, _) => {
+                Ok(WaitStatus::Signaled(pid, sig, _)) => {
                     warn!(pid = pid.as_raw(), signal = ?sig, "Child process killed by signal");
                     handle_child_exit(pid, 128 + (sig as i32) as u32, &state).await;
                 }
-
-                WaitStatus::StillAlive
-                | WaitStatus::Stopped(_, _)
-                | WaitStatus::Continued(_) => {
+                Ok(WaitStatus::StillAlive) => {
+                    break; // no children exited, exit inner loop
+                }
+                Ok(WaitStatus::Stopped(_, _)) | Ok(WaitStatus::Continued(_)) => {
+                    // ignore these, continue looping
+                }
+                Ok(WaitStatus::PtraceEvent(_, _, _)) | Ok(WaitStatus::PtraceSyscall(_)) => {
+                    tracing::debug!("Received ptrace-related status; ignoring");
+                }
+                Err(_) => {
+                    // error or no children, exit inner loop
+                    break;
                 }
             }
         }
-
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
 }
+
 
 
 

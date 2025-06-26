@@ -71,7 +71,7 @@ where
     let config = Config::builder().build();
     let mut rl = Editor::with_config(config)?;
     rl.set_helper(Some(CmdCompleter {
-        commands: vec!["status", "reload", "start", "stop", "exit"].into_iter().map(String::from).collect(),
+        commands: vec!["status", "reload", "start", "stop", "exit", "help", "tail"].into_iter().map(String::from).collect(),
     }));
     let _ = rl.load_history("logs/history.txt");
 
@@ -119,7 +119,7 @@ where
                             println!("{}", line);
                         }
                     }
-                    "help" => println!("start -instance_name --start a program\nstop -instance_name --stop a program\nreload --reload all programs\nstatus --status of all programs\nexit --exit supervisor"),
+                    "help" => println!("start -instance_name --start a program\nstop -instance_name --stop a program\nreload --reload all programs\nstatus --status of all programs\nexit --exit supervisor\ntail --last 10 logs traces"),
                     other => println!("Unknown command: {}", other),
                 }
             }
